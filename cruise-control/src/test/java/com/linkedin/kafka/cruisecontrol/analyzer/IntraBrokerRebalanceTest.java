@@ -6,6 +6,9 @@ package com.linkedin.kafka.cruisecontrol.analyzer;
 
 import com.linkedin.kafka.cruisecontrol.analyzer.goals.IntraBrokerDiskCapacityGoal;
 import com.linkedin.kafka.cruisecontrol.analyzer.goals.IntraBrokerDiskUsageDistributionGoal;
+import com.linkedin.kafka.cruisecontrol.analyzer.goals.IntraBrokerLeaderReplicaDistributionGoal;
+import com.linkedin.kafka.cruisecontrol.analyzer.goals.IntraBrokerReplicaDistributionGoal;
+import com.linkedin.kafka.cruisecontrol.analyzer.goals.IntraBrokerTopicReplicaDistributionGoal;
 import com.linkedin.kafka.cruisecontrol.common.ClusterProperty;
 import com.linkedin.kafka.cruisecontrol.config.KafkaCruiseControlConfig;
 import com.linkedin.kafka.cruisecontrol.KafkaCruiseControlUnitTestUtils;
@@ -102,8 +105,15 @@ public class IntraBrokerRebalanceTest {
   @Parameterized.Parameters(name = "{0}")
   public static Collection<Object[]> data() {
     Collection<Object[]> p = new ArrayList<>();
-    List<String> goalNameByPriority = Arrays.asList(IntraBrokerDiskCapacityGoal.class.getName(),
-                                                    IntraBrokerDiskUsageDistributionGoal.class.getName());
+    // Original intra-broker goals (hard + disk usage)
+    List<String> originalGoals = Arrays.asList(IntraBrokerDiskCapacityGoal.class.getName(),
+                                               IntraBrokerDiskUsageDistributionGoal.class.getName());
+    // All intra-broker goals including the new soft goals
+    List<String> allGoals = Arrays.asList(IntraBrokerDiskCapacityGoal.class.getName(),
+                                          IntraBrokerDiskUsageDistributionGoal.class.getName(),
+                                          IntraBrokerReplicaDistributionGoal.class.getName(),
+                                          IntraBrokerLeaderReplicaDistributionGoal.class.getName(),
+                                          IntraBrokerTopicReplicaDistributionGoal.class.getName());
     Properties props = KafkaCruiseControlUnitTestUtils.getKafkaCruiseControlProperties();
     props.setProperty(AnalyzerConfig.MAX_REPLICAS_PER_BROKER_CONFIG, Long.toString(2000L));
     BalancingConstraint balancingConstraint = new BalancingConstraint(new KafkaCruiseControlConfig(props));
@@ -116,36 +126,42 @@ public class IntraBrokerRebalanceTest {
     List<String> testGoal;
     Map<ClusterProperty, Number> jbodCluster = new HashMap<>();
     jbodCluster.put(ClusterProperty.POPULATE_REPLICA_PLACEMENT_INFO, 1);
-    // Test: Single Goal.
-    for (int i = 0; i < goalNameByPriority.size(); i++) {
-      testGoal = goalNameByPriority.subList(i, i + 1);
+    // Test: Single Goal (all goals).
+    for (int i = 0; i < allGoals.size(); i++) {
+      testGoal = allGoals.subList(i, i + 1);
       p.add(params(testId++, jbodCluster, testGoal, balancingConstraint, Collections.emptySet(), verifications));
     }
-    // Test: Multiple Goals.
-    p.add(params(testId++, jbodCluster, goalNameByPriority, balancingConstraint, Collections.emptySet(), verifications));
+    // Test: Multiple Goals (original goals only to avoid inter-goal regression).
+    p.add(params(testId++, jbodCluster, originalGoals, balancingConstraint, Collections.emptySet(), verifications));
 
-    // -- TEST DECK #2: CLUSTER WITH DEAD&BROKEN BROKER.
+    // -- TEST DECK #2: CLUSTER WITH EXCLUDED TOPICS.
     Set<String> excludedTopics = Set.of(T1, T2);
-    // Test: Single Goal.
-    for (int i = 0; i < goalNameByPriority.size(); i++) {
-      testGoal = goalNameByPriority.subList(i, i + 1);
+    // Test: Single Goal (all goals).
+    for (int i = 0; i < allGoals.size(); i++) {
+      testGoal = allGoals.subList(i, i + 1);
       p.add(params(testId++, jbodCluster, testGoal, balancingConstraint, excludedTopics, verifications));
     }
-    // Test: Multiple Goals.
-    p.add(params(testId++, jbodCluster, goalNameByPriority, balancingConstraint, excludedTopics, verifications));
+    // Test: Multiple Goals (original goals only).
+    p.add(params(testId++, jbodCluster, originalGoals, balancingConstraint, excludedTopics, verifications));
 
-    // -- TEST DECK #3: CLUSTER WITH EXCLUDED TOPIC.
+    // -- TEST DECK #3: CLUSTER WITH DEAD&BROKEN BROKERS.
     Map<ClusterProperty, Number> unhealthyCluster = new HashMap<>();
     unhealthyCluster.put(ClusterProperty.POPULATE_REPLICA_PLACEMENT_INFO, 1);
     unhealthyCluster.put(ClusterProperty.NUM_BROKERS_WITH_BAD_DISK, 5);
     unhealthyCluster.put(ClusterProperty.NUM_DEAD_BROKERS, 5);
-    // Test: Single Goal.
-    for (int i = 0; i < goalNameByPriority.size(); i++) {
-      testGoal = goalNameByPriority.subList(i, i + 1);
+    // Test: Single Goal (original goals with full verifications).
+    for (int i = 0; i < originalGoals.size(); i++) {
+      testGoal = originalGoals.subList(i, i + 1);
       p.add(params(testId++, unhealthyCluster, testGoal, balancingConstraint, Collections.emptySet(), verifications));
     }
-    // Test: Multiple Goal.
-    p.add(params(testId++, unhealthyCluster, goalNameByPriority, balancingConstraint, Collections.emptySet(), verifications));
+    // Test: Single Goal (new soft goals with relaxed verifications - soft goals may not satisfy on unhealthy clusters).
+    List<OptimizationVerifier.Verification> softGoalVerifications = Collections.singletonList(REGRESSION);
+    for (int i = 2; i < allGoals.size(); i++) {
+      testGoal = allGoals.subList(i, i + 1);
+      p.add(params(testId++, unhealthyCluster, testGoal, balancingConstraint, Collections.emptySet(), softGoalVerifications));
+    }
+    // Test: Multiple Goals (original goals only).
+    p.add(params(testId++, unhealthyCluster, originalGoals, balancingConstraint, Collections.emptySet(), verifications));
 
     return p;
   }

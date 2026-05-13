@@ -459,6 +459,9 @@ public class Broker implements Serializable, Comparable<Broker> {
     // Remove leadership load from load.
     _load.subtractLoad(leadershipLoadDelta);
     _leaderReplicas.remove(replica);
+    if (replica.disk() != null) {
+      replica.disk().onLeadershipChange(false);
+    }
     addSortedReplicas(replica);
     return leadershipLoadDelta;
   }
@@ -480,6 +483,9 @@ public class Broker implements Serializable, Comparable<Broker> {
     // Add leadership load to load.
     _load.addLoad(leadershipLoadDelta);
     _leaderReplicas.add(replica);
+    if (replica.disk() != null) {
+      replica.disk().onLeadershipChange(true);
+    }
     addSortedReplicas(replica);
   }
 

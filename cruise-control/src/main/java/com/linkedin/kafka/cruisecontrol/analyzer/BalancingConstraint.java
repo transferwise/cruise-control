@@ -28,6 +28,9 @@ public class BalancingConstraint {
   private final double _topicReplicaBalancePercentage;
   private final int _topicReplicaBalanceMinGap;
   private final int _topicReplicaBalanceMaxGap;
+  private final double _intraBrokerReplicaBalancePercentage;
+  private final double _intraBrokerLeaderReplicaBalancePercentage;
+  private final double _intraBrokerTopicReplicaBalancePercentage;
   private final double _goalViolationDistributionThresholdMultiplier;
   private final Map<Resource, Double> _capacityThreshold;
   private final Map<Resource, Double> _lowUtilizationThreshold;
@@ -78,6 +81,10 @@ public class BalancingConstraint {
     _topicReplicaBalancePercentage = config.getDouble(AnalyzerConfig.TOPIC_REPLICA_COUNT_BALANCE_THRESHOLD_CONFIG);
     _topicReplicaBalanceMinGap = config.getInt(AnalyzerConfig.TOPIC_REPLICA_COUNT_BALANCE_MIN_GAP_CONFIG);
     _topicReplicaBalanceMaxGap = config.getInt(AnalyzerConfig.TOPIC_REPLICA_COUNT_BALANCE_MAX_GAP_CONFIG);
+    // Set default value for the balance percentage of intra-broker (1) replica, (2) leader replica and (3) topic replica distribution.
+    _intraBrokerReplicaBalancePercentage = config.getDouble(AnalyzerConfig.INTRA_BROKER_REPLICA_COUNT_BALANCE_THRESHOLD_CONFIG);
+    _intraBrokerLeaderReplicaBalancePercentage = config.getDouble(AnalyzerConfig.INTRA_BROKER_LEADER_REPLICA_COUNT_BALANCE_THRESHOLD_CONFIG);
+    _intraBrokerTopicReplicaBalancePercentage = config.getDouble(AnalyzerConfig.INTRA_BROKER_TOPIC_REPLICA_COUNT_BALANCE_THRESHOLD_CONFIG);
     _goalViolationDistributionThresholdMultiplier = config.getDouble(AnalyzerConfig.GOAL_VIOLATION_DISTRIBUTION_THRESHOLD_MULTIPLIER_CONFIG);
     // Set default value for the topics that must have a minimum number of leader replicas on brokers that are not
     // excluded for replica move.
@@ -122,6 +129,9 @@ public class BalancingConstraint {
     props.put(AnalyzerConfig.TOPIC_REPLICA_COUNT_BALANCE_THRESHOLD_CONFIG, Double.toString(_topicReplicaBalancePercentage));
     props.put(AnalyzerConfig.TOPIC_REPLICA_COUNT_BALANCE_MIN_GAP_CONFIG, Integer.toString(_topicReplicaBalanceMinGap));
     props.put(AnalyzerConfig.TOPIC_REPLICA_COUNT_BALANCE_MAX_GAP_CONFIG, Integer.toString(_topicReplicaBalanceMaxGap));
+    props.put(AnalyzerConfig.INTRA_BROKER_REPLICA_COUNT_BALANCE_THRESHOLD_CONFIG, Double.toString(_intraBrokerReplicaBalancePercentage));
+    props.put(AnalyzerConfig.INTRA_BROKER_LEADER_REPLICA_COUNT_BALANCE_THRESHOLD_CONFIG, Double.toString(_intraBrokerLeaderReplicaBalancePercentage));
+    props.put(AnalyzerConfig.INTRA_BROKER_TOPIC_REPLICA_COUNT_BALANCE_THRESHOLD_CONFIG, Double.toString(_intraBrokerTopicReplicaBalancePercentage));
     props.put(AnalyzerConfig.GOAL_VIOLATION_DISTRIBUTION_THRESHOLD_MULTIPLIER_CONFIG, Double.toString(_goalViolationDistributionThresholdMultiplier));
     props.put(AnalyzerConfig.TOPICS_WITH_MIN_LEADERS_PER_BROKER_CONFIG, _topicsWithMinLeadersPerBrokerPattern.pattern());
     props.put(AnalyzerConfig.MIN_TOPIC_LEADERS_PER_BROKER_CONFIG, Integer.toString(_minTopicLeadersPerBroker));
@@ -195,6 +205,30 @@ public class BalancingConstraint {
    */
   public int topicReplicaBalanceMaxGap() {
     return _topicReplicaBalanceMaxGap;
+  }
+
+  /**
+   * @return The intra-broker replica balance percentage for
+   * {@link com.linkedin.kafka.cruisecontrol.analyzer.goals.IntraBrokerReplicaDistributionGoal}.
+   */
+  public double intraBrokerReplicaBalancePercentage() {
+    return _intraBrokerReplicaBalancePercentage;
+  }
+
+  /**
+   * @return The intra-broker leader replica balance percentage for
+   * {@link com.linkedin.kafka.cruisecontrol.analyzer.goals.IntraBrokerLeaderReplicaDistributionGoal}.
+   */
+  public double intraBrokerLeaderReplicaBalancePercentage() {
+    return _intraBrokerLeaderReplicaBalancePercentage;
+  }
+
+  /**
+   * @return The intra-broker topic replica balance percentage for
+   * {@link com.linkedin.kafka.cruisecontrol.analyzer.goals.IntraBrokerTopicReplicaDistributionGoal}.
+   */
+  public double intraBrokerTopicReplicaBalancePercentage() {
+    return _intraBrokerTopicReplicaBalancePercentage;
   }
 
   /**

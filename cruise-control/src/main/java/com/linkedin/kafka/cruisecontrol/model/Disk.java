@@ -42,6 +42,10 @@ public class Disk implements Comparable<Disk> {
   private double _utilization;
   // A map of cached sorted replicas using different user defined score functions.
   private final Map<String, SortedReplicas> _sortedReplicas;
+  // Cached per-topic replica count, updated on addReplica/removeReplica.
+  private final Map<String, Integer> _replicaCountByTopic;
+  // Cached leader replica count, updated on addReplica/removeReplica and leadership changes.
+  private int _leaderReplicaCount;
 
   /**
    * Constructor for Disk class.
@@ -56,6 +60,8 @@ public class Disk implements Comparable<Disk> {
     _replicas = new HashSet<>();
     _utilization = 0;
     _sortedReplicas = new HashMap<>();
+    _replicaCountByTopic = new HashMap<>();
+    _leaderReplicaCount = 0;
 
     if (diskCapacity < 0) {
       _capacity = DEAD_DISK_CAPACITY;
@@ -88,6 +94,36 @@ public class Disk implements Comparable<Disk> {
 
   public Set<Replica> leaderReplicas() {
     return _replicas.stream().filter(Replica::isLeader).collect(Collectors.toUnmodifiableSet());
+  }
+
+  /**
+   * @param topic Topic for which the replica count will be returned.
+   * @return The number of replicas from the given topic on this disk.
+   */
+  public int numReplicasOfTopic(String topic) {
+    return _replicaCountByTopic.getOrDefault(topic, 0);
+  }
+
+  /**
+   * @return The number of leader replicas on this disk.
+   */
+  public int numLeaderReplicas() {
+    return _leaderReplicaCount;
+  }
+
+  /**
+   * Notify the disk that a replica's leadership status has changed.
+   * @param becameLeader {@code true} if the replica became a leader, {@code false} if it became a follower.
+   */
+  void onLeadershipChange(boolean becameLeader) {
+    if (becameLeader) {
+      _leaderReplicaCount++;
+    } else {
+      if (_leaderReplicaCount <= 0) {
+        throw new IllegalStateException("Cannot decrement leader replica count below zero on disk " + _logDir);
+      }
+      _leaderReplicaCount--;
+    }
   }
 
   public Broker broker() {
@@ -128,6 +164,10 @@ public class Disk implements Comparable<Disk> {
     }
     _utilization += replica.load().expectedUtilizationFor(Resource.DISK);
     _replicas.add(replica);
+    _replicaCountByTopic.merge(replica.topicPartition().topic(), 1, Integer::sum);
+    if (replica.isLeader()) {
+      _leaderReplicaCount++;
+    }
     replica.setDisk(this);
     _sortedReplicas.values().forEach(sr -> sr.add(replica));
   }
@@ -156,6 +196,13 @@ public class Disk implements Comparable<Disk> {
     }
     _utilization -= replica.load().expectedUtilizationFor(Resource.DISK);
     _replicas.remove(replica);
+    _replicaCountByTopic.computeIfPresent(replica.topicPartition().topic(), (k, v) -> v <= 1 ? null : v - 1);
+    if (replica.isLeader()) {
+      if (_leaderReplicaCount <= 0) {
+        throw new IllegalStateException("Cannot decrement leader replica count below zero on disk " + _logDir);
+      }
+      _leaderReplicaCount--;
+    }
     _sortedReplicas.values().forEach(sr -> sr.remove(replica));
   }
 
@@ -257,7 +304,7 @@ public class Disk implements Comparable<Disk> {
    * @return Disk stats.
    */
   public DiskStats diskStats() {
-    return new DiskStats((int) _replicas.stream().filter(Replica::isLeader).count(),
+    return new DiskStats(_leaderReplicaCount,
                          _replicas.size(),
                          _utilization,
                          _capacity);

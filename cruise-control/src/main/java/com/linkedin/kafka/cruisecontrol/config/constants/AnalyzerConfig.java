@@ -115,6 +115,33 @@ public final class AnalyzerConfig {
       + "should not be above 1.80x of average replica count of all brokers for the same topic.";
 
   /**
+   * <code>intra.broker.replica.count.balance.threshold</code>
+   */
+  public static final String INTRA_BROKER_REPLICA_COUNT_BALANCE_THRESHOLD_CONFIG = "intra.broker.replica.count.balance.threshold";
+  public static final double DEFAULT_INTRA_BROKER_REPLICA_COUNT_BALANCE_THRESHOLD = 1.10;
+  public static final String INTRA_BROKER_REPLICA_COUNT_BALANCE_THRESHOLD_DOC = "The maximum allowed extent of unbalance for "
+      + "intra-broker replica distribution across disks. For example, 1.10 means the highest replica count of a disk should "
+      + "not be above 1.10x of average replica count of all alive disks on the same broker.";
+
+  /**
+   * <code>intra.broker.leader.replica.count.balance.threshold</code>
+   */
+  public static final String INTRA_BROKER_LEADER_REPLICA_COUNT_BALANCE_THRESHOLD_CONFIG = "intra.broker.leader.replica.count.balance.threshold";
+  public static final double DEFAULT_INTRA_BROKER_LEADER_REPLICA_COUNT_BALANCE_THRESHOLD = 1.10;
+  public static final String INTRA_BROKER_LEADER_REPLICA_COUNT_BALANCE_THRESHOLD_DOC = "The maximum allowed extent of unbalance "
+      + "for intra-broker leader replica distribution across disks. For example, 1.10 means the highest leader replica count "
+      + "of a disk should not be above 1.10x of average leader replica count of all alive disks on the same broker.";
+
+  /**
+   * <code>intra.broker.topic.replica.count.balance.threshold</code>
+   */
+  public static final String INTRA_BROKER_TOPIC_REPLICA_COUNT_BALANCE_THRESHOLD_CONFIG = "intra.broker.topic.replica.count.balance.threshold";
+  public static final double DEFAULT_INTRA_BROKER_TOPIC_REPLICA_COUNT_BALANCE_THRESHOLD = 1.50;
+  public static final String INTRA_BROKER_TOPIC_REPLICA_COUNT_BALANCE_THRESHOLD_DOC = "The maximum allowed extent of unbalance "
+      + "for intra-broker per-topic replica distribution across disks. For example, 1.50 means the highest topic replica count "
+      + "of a disk should not be above 1.50x of average topic replica count of all alive disks on the same broker.";
+
+  /**
    * <code>topic.replica.count.balance.min.gap</code>
    */
   public static final String TOPIC_REPLICA_COUNT_BALANCE_MIN_GAP_CONFIG = "topic.replica.count.balance.min.gap";
@@ -526,6 +553,24 @@ public final class AnalyzerConfig {
                             atLeast(1),
                             ConfigDef.Importance.MEDIUM,
                             TOPIC_REPLICA_COUNT_BALANCE_MAX_GAP_DOC)
+                    .define(INTRA_BROKER_REPLICA_COUNT_BALANCE_THRESHOLD_CONFIG,
+                            ConfigDef.Type.DOUBLE,
+                            DEFAULT_INTRA_BROKER_REPLICA_COUNT_BALANCE_THRESHOLD,
+                            atLeast(1),
+                            ConfigDef.Importance.MEDIUM,
+                            INTRA_BROKER_REPLICA_COUNT_BALANCE_THRESHOLD_DOC)
+                    .define(INTRA_BROKER_LEADER_REPLICA_COUNT_BALANCE_THRESHOLD_CONFIG,
+                            ConfigDef.Type.DOUBLE,
+                            DEFAULT_INTRA_BROKER_LEADER_REPLICA_COUNT_BALANCE_THRESHOLD,
+                            atLeast(1),
+                            ConfigDef.Importance.MEDIUM,
+                            INTRA_BROKER_LEADER_REPLICA_COUNT_BALANCE_THRESHOLD_DOC)
+                    .define(INTRA_BROKER_TOPIC_REPLICA_COUNT_BALANCE_THRESHOLD_CONFIG,
+                            ConfigDef.Type.DOUBLE,
+                            DEFAULT_INTRA_BROKER_TOPIC_REPLICA_COUNT_BALANCE_THRESHOLD,
+                            atLeast(1),
+                            ConfigDef.Importance.MEDIUM,
+                            INTRA_BROKER_TOPIC_REPLICA_COUNT_BALANCE_THRESHOLD_DOC)
                     .define(CPU_CAPACITY_THRESHOLD_CONFIG,
                             ConfigDef.Type.DOUBLE,
                             DEFAULT_CPU_CAPACITY_THRESHOLD,
