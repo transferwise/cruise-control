@@ -28,7 +28,6 @@ import java.io.IOException;
 import java.io.UnsupportedEncodingException;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -56,7 +55,7 @@ import static com.linkedin.kafka.cruisecontrol.servlet.parameters.TopicConfigura
 import static com.linkedin.kafka.cruisecontrol.servlet.purgatory.ReviewStatus.APPROVED;
 import static com.linkedin.kafka.cruisecontrol.servlet.purgatory.ReviewStatus.DISCARDED;
 import static com.linkedin.kafka.cruisecontrol.servlet.response.ResponseUtils.writeErrorResponse;
-import static javax.servlet.http.HttpServletResponse.SC_BAD_REQUEST;
+import static jakarta.servlet.http.HttpServletResponse.SC_BAD_REQUEST;
 
 /**
  * The util class for Kafka Cruise Control parameters.
@@ -185,14 +184,20 @@ public final class ParameterUtils {
         throw new UserRequestException("Unsupported request method: " + requestContext.getMethod() + ".");
     }
     String pathInfo = requestContext.getPathInfo();
-    if (pathInfo == null) {
+    if (pathInfo == null || !pathInfo.startsWith("/")) {
       // URL does not have any extra path information
       return null;
     }
     // Skip the first character '/'
-    Path path = Path.of(pathInfo).getFileName();
+    String endpointName = pathInfo.substring(1);
+    if (endpointName.endsWith("/")) {
+      endpointName = endpointName.substring(0, endpointName.length() - 1);
+    }
+    if (endpointName.isEmpty() || endpointName.contains("/")) {
+      return null;
+    }
     for (CruiseControlEndPoint endPoint : supportedEndpoints) {
-      if (endPoint.toString().equalsIgnoreCase(String.valueOf(path))) {
+      if (endPoint.toString().equalsIgnoreCase(endpointName)) {
         return endPoint;
       }
     }

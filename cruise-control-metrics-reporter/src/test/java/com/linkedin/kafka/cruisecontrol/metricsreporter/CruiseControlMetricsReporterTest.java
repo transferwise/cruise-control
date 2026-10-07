@@ -2,6 +2,20 @@
  * Copyright 2017 LinkedIn Corp. Licensed under the BSD 2-Clause License (the "License"). See License in the project root for license information.
  */
 
+/*
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.linkedin.kafka.cruisecontrol.metricsreporter;
 
 import com.linkedin.kafka.cruisecontrol.metricsreporter.metric.CruiseControlMetric;
@@ -17,7 +31,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Properties;
 import java.util.Set;
-import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.regex.Pattern;
 import org.apache.kafka.clients.CommonClientConfigs;
@@ -50,7 +63,7 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 
 public class CruiseControlMetricsReporterTest extends CCKafkaClientsIntegrationTestHarness {
-  private static final int NUM_OF_BROKERS = 2;
+  private static final int NUM_OF_BROKERS = 3;
   protected static final String TOPIC = "CruiseControlMetricsReporterTest";
   protected static final String HOST = "127.0.0.1";
   protected CCContainerizedKraftCluster _cluster;
@@ -113,6 +126,11 @@ public class CruiseControlMetricsReporterTest extends CCKafkaClientsIntegrationT
     props.setProperty("offsets.topic.replication.factor", "1");
     props.setProperty("default.replication.factor", "2");
     return props;
+  }
+
+  @Override
+  protected int clusterSize() {
+    return NUM_OF_BROKERS;
   }
 
   @Test
@@ -201,8 +219,10 @@ public class CruiseControlMetricsReporterTest extends CCKafkaClientsIntegrationT
   }
 
   @Test
-  public void testUpdatingMetricsTopicConfig() throws InterruptedException, TimeoutException {
-    TopicDescription topicDescription = _cluster.waitForTopicMetadata(TOPIC, Duration.ofSeconds(30), td -> true);
+  public void testUpdatingMetricsTopicConfig() {
+    Map<String, TopicDescription> topicDescriptions =
+      _cluster.waitForTopicMetadata(List.of(TOPIC), Duration.ofSeconds(5), Duration.ofSeconds(30), td -> true);
+    TopicDescription topicDescription = topicDescriptions.get(TOPIC);
     assertEquals(1, topicDescription.partitions().size());
 
     KafkaContainer broker = _cluster.getBrokers().get(0);
@@ -223,9 +243,9 @@ public class CruiseControlMetricsReporterTest extends CCKafkaClientsIntegrationT
 
     // Wait for topic metadata configuration change to propagate
     int oldPartitionCount = topicDescription.partitions().size();
-    TopicDescription newTopicDescription = _cluster.waitForTopicMetadata(TOPIC, Duration.ofSeconds(30),
-      td -> td.partitions().size() != oldPartitionCount);
-
+    Map<String, TopicDescription> newTopicDescriptions = _cluster.waitForTopicMetadata(
+      List.of(TOPIC), Duration.ofSeconds(5), Duration.ofSeconds(30), td -> td.partitions().size() != oldPartitionCount);
+    TopicDescription newTopicDescription = newTopicDescriptions.get(TOPIC);
     assertEquals(2, newTopicDescription.partitions().size());
   }
 

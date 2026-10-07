@@ -27,7 +27,6 @@ public class CCEmbeddedKRaftController implements AutoCloseable {
     private static final String LISTENERS_CONFIG = "listeners";
     private static final String QUORUM_VOTERS_CONFIG = "controller.quorum.voters";
     private static final String LOG_DIR_CONFIG = "log.dir";
-    private static final String METADATA_LOG_DIR_CONFIG = "metadata.log.dir";
 
     private int _port = 0;
     private final File _logDir;
@@ -100,7 +99,7 @@ public class CCEmbeddedKRaftController implements AutoCloseable {
         props.setProperty(LISTENERS_CONFIG, "CONTROLLER://:" + _port);
         props.setProperty(QUORUM_VOTERS_CONFIG, quorumVoters());
         props.setProperty(LOG_DIR_CONFIG, _logDir.getAbsolutePath());
-        props.setProperty(METADATA_LOG_DIR_CONFIG, _logDir.getAbsolutePath());
+        props.setProperty(KafkaServerConfigs.METADATA_LOG_DIR_CONFIG, _logDir.getAbsolutePath());
         return props;
     }
 

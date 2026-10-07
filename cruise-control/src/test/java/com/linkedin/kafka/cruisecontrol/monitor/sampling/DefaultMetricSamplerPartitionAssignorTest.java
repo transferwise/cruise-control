@@ -17,7 +17,6 @@ import org.apache.kafka.common.PartitionInfo;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.internals.ClusterResourceListeners;
 import org.apache.kafka.common.protocol.Errors;
-import org.apache.kafka.common.record.RecordBatch;
 import org.apache.kafka.common.requests.MetadataResponse;
 import org.apache.kafka.common.utils.LogContext;
 import org.junit.Test;
@@ -32,6 +31,7 @@ import static com.linkedin.kafka.cruisecontrol.monitor.MonitorUnitTestUtils.META
 import static com.linkedin.kafka.cruisecontrol.monitor.MonitorUnitTestUtils.NODE_0;
 import static com.linkedin.kafka.cruisecontrol.monitor.MonitorUnitTestUtils.nodes;
 import static com.linkedin.kafka.cruisecontrol.monitor.MonitorUnitTestUtils.nodeIds;
+import static com.linkedin.kafka.cruisecontrol.monitor.MonitorUnitTestUtils.NO_PARTITION_LEADER_EPOCH;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 
@@ -81,7 +81,7 @@ public class DefaultMetricSamplerPartitionAssignorTest {
         partitionMetadata.add(new MetadataResponse.PartitionMetadata(Errors.NONE,
                                                                      new TopicPartition(
                                                                              tp.topic(), tp.partition()), Optional.of(NODE_0.id()),
-                                                                     Optional.of(RecordBatch.NO_PARTITION_LEADER_EPOCH),
+                                                                     Optional.of(NO_PARTITION_LEADER_EPOCH),
                                                                      nodeIds(), nodeIds(),
                                                                      Collections.emptyList()));
       }

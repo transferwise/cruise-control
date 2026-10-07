@@ -6,7 +6,7 @@ package com.linkedin.kafka.cruisecontrol.executor;
 
 import com.codahale.metrics.MetricRegistry;
 import com.linkedin.kafka.cruisecontrol.KafkaCruiseControlUnitTestUtils;
-import com.linkedin.kafka.cruisecontrol.common.MetadataClient;
+import com.linkedin.kafka.cruisecontrol.common.MetadataAdminClient;
 import com.linkedin.kafka.cruisecontrol.config.KafkaCruiseControlConfig;
 import com.linkedin.kafka.cruisecontrol.detector.AnomalyDetectorManager;
 import com.linkedin.kafka.cruisecontrol.model.ReplicaPlacementInfo;
@@ -217,13 +217,13 @@ public class InterBrokerValidationCleanupTest {
     }).anyTimes();
     admin.close();
     EasyMock.expectLastCall();
-    MetadataClient metadata = EasyMock.niceMock(MetadataClient.class);
+    MetadataAdminClient metadata = EasyMock.niceMock(MetadataAdminClient.class);
     Node source = new Node(0, "localhost", 9092);
     Node target = new Node(1, "localhost", 9093);
     Cluster cluster = new Cluster("test", List.of(source, target), List.of(
         new PartitionInfo("topic", 0, source, new Node[]{source, target}, new Node[]{source, target}),
         new PartitionInfo("topic", 1, target, new Node[]{target}, new Node[]{target})), Set.of(), Set.of());
-    EasyMock.expect(metadata.refreshMetadata()).andReturn(new MetadataClient.ClusterAndGeneration(cluster, 0)).anyTimes();
+    EasyMock.expect(metadata.cluster()).andReturn(cluster).anyTimes();
     LoadMonitor monitor = EasyMock.mock(LoadMonitor.class);
     EasyMock.expect(monitor.deadBrokersWithReplicas(EasyMock.anyLong())).andReturn(Set.of());
     ExecutionTaskManager manager = EasyMock.niceMock(ExecutionTaskManager.class);
@@ -259,12 +259,8 @@ public class InterBrokerValidationCleanupTest {
         new com.linkedin.kafka.cruisecontrol.executor.concurrency.ExecutionConcurrencyManager(config);
     EasyMock.expect(manager.getExecutionConcurrencyManager()).andReturn(concurrency).anyTimes();
     EasyMock.replay(admin, metadata, manager, monitor);
-    Executor executor = new Executor(config, Time.SYSTEM, new MetricRegistry(), metadata,
+    Executor executor = new Executor(config, Time.SYSTEM, new MetricRegistry(), admin, metadata,
         EasyMock.niceMock(ExecutorNotifier.class), EasyMock.niceMock(AnomalyDetectorManager.class));
-    Field adminField = Executor.class.getDeclaredField("_adminClient");
-    adminField.setAccessible(true);
-    ((AdminClient) adminField.get(executor)).close();
-    setField(executor, "_adminClient", admin);
     setField(executor, "_executionTaskManager", manager);
     setField(executor, "_defaultExecutionProgressCheckIntervalMs", 1L);
     setField(executor, "_minExecutionProgressCheckIntervalMs", 1L);

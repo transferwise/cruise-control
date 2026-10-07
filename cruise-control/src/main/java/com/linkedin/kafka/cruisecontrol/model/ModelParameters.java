@@ -9,7 +9,6 @@ import com.linkedin.kafka.cruisecontrol.config.constants.MonitorConfig;
 import com.linkedin.kafka.cruisecontrol.monitor.sampling.holder.BrokerMetricSample;
 import java.util.Collection;
 import javax.annotation.Nonnull;
-import org.apache.kafka.common.record.CompressionType;
 
 
 public final class ModelParameters {
@@ -85,23 +84,6 @@ public final class ModelParameters {
   @Nonnull
   public static LinearRegressionModelParameters.LinearRegressionModelState linearRegressionModelState() {
     return LINEAR_REGRESSION_PARAMETERS.modelState();
-  }
-
-  // The following methods are not used at this point. They are supposed to be used for static model when users did
-  // not specify the weights.
-  private static ConfigSetting forSetting(CompressionType type, boolean sslEnabled) {
-    switch (type) {
-      case NONE:
-        return sslEnabled ? ConfigSetting.SSL_NONE : ConfigSetting.PLAINTEXT_NONE;
-      case GZIP:
-        return sslEnabled ? ConfigSetting.SSL_GZIP : ConfigSetting.PLAINTEXT_GZIP;
-      case SNAPPY:
-        return sslEnabled ? ConfigSetting.SSL_SNAPPY : ConfigSetting.PLAINTEXT_SNAPPY;
-      case LZ4:
-        return sslEnabled ? ConfigSetting.SSL_LZ4 : ConfigSetting.PLAINTEXT_LZ4;
-      default:
-        throw new IllegalStateException("Should not be here.");
-    }
   }
 
   /**

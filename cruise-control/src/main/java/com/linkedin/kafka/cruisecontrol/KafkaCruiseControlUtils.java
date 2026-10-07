@@ -47,14 +47,13 @@ import org.apache.kafka.common.config.TopicConfig;
 import org.apache.kafka.common.errors.ReassignmentInProgressException;
 import org.apache.kafka.common.errors.TopicExistsException;
 import org.apache.kafka.common.message.MetadataResponseData;
-import org.apache.kafka.common.record.RecordBatch;
 import org.apache.kafka.common.requests.AbstractResponse;
 import org.apache.kafka.common.requests.MetadataResponse;
 import org.apache.kafka.common.security.auth.SecurityProtocol;
 import org.apache.kafka.common.serialization.Deserializer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import javax.servlet.ServletException;
+import jakarta.servlet.ServletException;
 import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStream;
@@ -84,6 +83,9 @@ import static com.linkedin.kafka.cruisecontrol.servlet.parameters.ParameterUtils
  */
 public final class KafkaCruiseControlUtils {
   private static final Logger LOG = LoggerFactory.getLogger(KafkaCruiseControlUtils.class);
+  // Kafka's org.apache.kafka.common.record.RecordBatch moved to an internal package in 4.3; -1 is the stable
+  // sentinel value Kafka uses for "no partition leader epoch".
+  private static final int NO_PARTITION_LEADER_EPOCH = -1;
   // Cruise Control sensor types -- i.e. the first element of the metric name.
   public static final String EXECUTOR_SENSOR = "Executor";
   public static final String LOAD_MONITOR_SENSOR = "LoadMonitor";
@@ -668,7 +670,7 @@ public final class KafkaCruiseControlUtils {
               .setErrorCode(partitionMetadata.error.code())
               .setPartitionIndex(partitionMetadata.partition())
               .setLeaderId(partitionMetadata.leaderId.orElse(MetadataResponse.NO_LEADER_ID))
-              .setLeaderEpoch(partitionMetadata.leaderEpoch.orElse(RecordBatch.NO_PARTITION_LEADER_EPOCH))
+              .setLeaderEpoch(partitionMetadata.leaderEpoch.orElse(NO_PARTITION_LEADER_EPOCH))
               .setReplicaNodes(partitionMetadata.replicaIds)
               .setIsrNodes(partitionMetadata.inSyncReplicaIds)
               .setOfflineReplicas(partitionMetadata.offlineReplicaIds));

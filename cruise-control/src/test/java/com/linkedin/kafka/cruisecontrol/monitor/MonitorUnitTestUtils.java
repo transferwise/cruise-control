@@ -24,7 +24,6 @@ import org.apache.kafka.common.PartitionInfo;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.internals.ClusterResourceListeners;
 import org.apache.kafka.common.protocol.Errors;
-import org.apache.kafka.common.record.RecordBatch;
 import org.apache.kafka.common.requests.MetadataResponse;
 import org.apache.kafka.common.utils.LogContext;
 
@@ -33,6 +32,9 @@ public final class MonitorUnitTestUtils {
   public static final long METADATA_REFRESH_BACKOFF = 10L;
   public static final long METADATA_REFRESH_BACKOFF_MAX = CommonClientConfigs.DEFAULT_RETRY_BACKOFF_MAX_MS;
   public static final long METADATA_EXPIRY_MS = 10L;
+  // Kafka's org.apache.kafka.common.record.RecordBatch moved to an internal package in 4.3; -1 is the stable
+  // sentinel value Kafka uses for "no partition leader epoch".
+  public static final int NO_PARTITION_LEADER_EPOCH = -1;
   public static final Node NODE_0 = new Node(0, "localhost", 100, "rack0");
   public static final Node NODE_1 = new Node(1, "localhost", 100, "rack1");
   public static final Node NODE_2 = new Node(2, "localhost", 100, "rack2");
@@ -80,7 +82,7 @@ public final class MonitorUnitTestUtils {
       List<MetadataResponse.PartitionMetadata> partitionMetadata = new ArrayList<>(entry.getValue().size());
       for (TopicPartition tp : entry.getValue()) {
         partitionMetadata.add(new MetadataResponse.PartitionMetadata(Errors.NONE, tp, Optional.of(cluster.leaderFor(tp).id()),
-                                                                     Optional.of(RecordBatch.NO_PARTITION_LEADER_EPOCH),
+                                                                     Optional.of(NO_PARTITION_LEADER_EPOCH),
                                                                      nodeIds(), nodeIds(),
                                                                      Collections.emptyList()));
       }

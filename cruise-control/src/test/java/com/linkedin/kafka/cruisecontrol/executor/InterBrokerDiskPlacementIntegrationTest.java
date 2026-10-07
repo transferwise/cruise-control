@@ -70,7 +70,8 @@ public class InterBrokerDiskPlacementIntegrationTest extends CCKafkaClientsInteg
     TopicPartition tp = new TopicPartition(TOPIC, 0);
     try (AdminClient admin = AdminClient.create(Map.of(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG, _bootstrapUrl))) {
       admin.createTopics(List.of(new NewTopic(TOPIC, Map.of(0, List.of(0))))).all().get(30, TimeUnit.SECONDS);
-      _cluster.waitForTopicMetadata(TOPIC, Duration.ofSeconds(60), d -> d.partitions().get(0).leader() != null);
+      _cluster.waitForTopicMetadata(List.of(TOPIC), Duration.ofSeconds(30), Duration.ofSeconds(60),
+          d -> d.partitions().get(0).leader() != null);
       try (Producer<String, String> producer = createProducer(new Properties())) {
         producer.send(new ProducerRecord<>(TOPIC, "key", "value".repeat(10000))).get(30, TimeUnit.SECONDS);
       }
@@ -90,7 +91,7 @@ public class InterBrokerDiskPlacementIntegrationTest extends CCKafkaClientsInteg
       ExecutionTask accepted = task(tp, original, SECOND_DIR, 1_000_000_000.0);
       ExecutionUtils.submitReplicaReassignmentTasks(admin, List.of(accepted), Set.of(), 0.8, 30000)
                     .all().get(30, TimeUnit.SECONDS);
-      _cluster.waitForTopicMetadata(TOPIC, Duration.ofSeconds(90), d -> d.partitions().get(0).replicas().size() == 1
+      _cluster.waitForTopicMetadata(List.of(TOPIC), Duration.ofSeconds(30), Duration.ofSeconds(90), d -> d.partitions().get(0).replicas().size() == 1
           && d.partitions().get(0).replicas().get(0).id() == 1 && d.partitions().get(0).isr().size() == 1);
       TopicPartitionReplica destinationKey = new TopicPartitionReplica(TOPIC, 0, 1);
       ReplicaLogDirInfo destination = admin.describeReplicaLogDirs(List.of(destinationKey)).values().get(destinationKey)
@@ -114,7 +115,8 @@ public class InterBrokerDiskPlacementIntegrationTest extends CCKafkaClientsInteg
     TopicPartitionReplica replicaKey = new TopicPartitionReplica(TOPIC, 0, 0);
     try (AdminClient admin = AdminClient.create(Map.of(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG, _bootstrapUrl))) {
       admin.createTopics(List.of(new NewTopic(TOPIC, Map.of(0, List.of(0))))).all().get(30, TimeUnit.SECONDS);
-      _cluster.waitForTopicMetadata(TOPIC, Duration.ofSeconds(60), d -> d.partitions().get(0).leader() != null);
+      _cluster.waitForTopicMetadata(List.of(TOPIC), Duration.ofSeconds(30), Duration.ofSeconds(60),
+          d -> d.partitions().get(0).leader() != null);
       try (Producer<String, String> producer = createProducer(new Properties())) {
         producer.send(new ProducerRecord<>(TOPIC, "key", "value".repeat(10000))).get(30, TimeUnit.SECONDS);
       }

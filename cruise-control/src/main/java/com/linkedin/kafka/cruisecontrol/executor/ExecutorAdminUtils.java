@@ -2,6 +2,20 @@
  * Copyright 2019 LinkedIn Corp. Licensed under the BSD 2-Clause License (the "License"). See License in the project root for license information.
  */
 
+/*
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.linkedin.kafka.cruisecontrol.executor;
 
 import java.util.Collection;
@@ -13,11 +27,13 @@ import java.util.Set;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.stream.Collectors;
 import com.linkedin.kafka.cruisecontrol.config.KafkaCruiseControlConfig;
 import org.apache.kafka.clients.admin.AdminClient;
 import org.apache.kafka.clients.admin.LogDirDescription;
 import org.apache.kafka.clients.admin.ReplicaInfo;
 import org.apache.kafka.common.KafkaFuture;
+import org.apache.kafka.common.Node;
 import org.apache.kafka.common.TopicPartitionReplica;
 import org.apache.kafka.common.errors.KafkaStorageException;
 import org.apache.kafka.common.errors.LogDirNotFoundException;
@@ -166,14 +182,14 @@ public final class ExecutorAdminUtils {
 
   /**
    * Check whether there is ongoing intra-broker replica movement.
-   * @param brokersToCheck List of broker to check.
    * @param adminClient The adminClient to send describeLogDirs request.
    * @param config The config object that holds all the Cruise Control related configs
    * @return {@code true} if there is ongoing intra-broker replica movement.
    */
-  static boolean hasOngoingIntraBrokerReplicaMovement(Collection<Integer> brokersToCheck, AdminClient adminClient,
+  static boolean hasOngoingIntraBrokerReplicaMovement(AdminClient adminClient,
                                                       KafkaCruiseControlConfig config)
       throws InterruptedException, ExecutionException, TimeoutException {
+    Collection<Integer> brokersToCheck = adminClient.describeCluster().nodes().get().stream().map(Node::id).collect(Collectors.toSet());
     Map<Integer, KafkaFuture<Map<String, LogDirDescription>>> logDirsByBrokerId = adminClient.describeLogDirs(brokersToCheck).descriptions();
     for (Map.Entry<Integer, KafkaFuture<Map<String, LogDirDescription>>> entry : logDirsByBrokerId.entrySet()) {
       Map<String, LogDirDescription> logInfos = entry.getValue().get(config.getLong(LOGDIR_RESPONSE_TIMEOUT_MS_CONFIG), TimeUnit.MILLISECONDS);

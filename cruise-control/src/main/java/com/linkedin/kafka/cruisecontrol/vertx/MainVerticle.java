@@ -78,6 +78,10 @@ public class MainVerticle extends AbstractVerticle {
   }
 
   private Router buildRouter(RouterBuilder builder) {
+    if (!_asynckafkaCruiseControl.config().getBoolean(WebServerConfig.WEBSERVER_SECURITY_ENABLE_CONFIG)) {
+      builder.securityHandler("basicAuth", RoutingContext::next);
+      builder.securityHandler("jwtAuth", RoutingContext::next);
+    }
     builder.operation("state").handler(_endPoints::handle);
     builder.operation("kafkaClusterState").handler(_endPoints::handle);
     builder.operation("load").handler(_endPoints::handle);

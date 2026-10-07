@@ -6,31 +6,36 @@ package com.linkedin.kafka.cruisecontrol.servlet.security.jwt;
 
 import com.linkedin.kafka.cruisecontrol.CruiseControlIntegrationTestHarness;
 import com.linkedin.kafka.cruisecontrol.config.constants.WebServerConfig;
+import jakarta.servlet.http.HttpServletResponse;
 import org.bouncycastle.asn1.x500.X500Name;
 import org.bouncycastle.cert.jcajce.JcaX509CertificateConverter;
 import org.bouncycastle.cert.jcajce.JcaX509v3CertificateBuilder;
 import org.bouncycastle.jce.provider.BouncyCastleProvider;
 import org.bouncycastle.operator.ContentSigner;
 import org.bouncycastle.operator.jcajce.JcaContentSignerBuilder;
+import org.eclipse.jetty.http.HttpCookie;
 import org.eclipse.jetty.http.HttpHeader;
 import org.eclipse.jetty.security.HashLoginService;
+import org.eclipse.jetty.security.UserIdentity;
+import org.eclipse.jetty.server.Handler;
 import org.eclipse.jetty.server.Request;
+import org.eclipse.jetty.server.Response;
 import org.eclipse.jetty.server.Server;
-import org.eclipse.jetty.server.UserIdentity;
-import org.eclipse.jetty.server.handler.AbstractHandler;
+import org.eclipse.jetty.server.handler.ResourceHandler;
+import org.eclipse.jetty.util.Callback;
+import org.eclipse.jetty.util.Fields;
+import org.eclipse.jetty.util.resource.ResourceFactory;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
-import javax.servlet.http.Cookie;
-import javax.servlet.http.HttpServletRequest;
-import javax.servlet.http.HttpServletResponse;
 import java.io.File;
 import java.io.FileOutputStream;
-import java.io.IOException;
 import java.io.OutputStream;
 import java.math.BigInteger;
 import java.net.HttpURLConnection;
+import java.net.InetSocketAddress;
 import java.net.URI;
+import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.security.Provider;
 import java.security.Security;
@@ -55,36 +60,42 @@ public class JwtSecurityProviderIntegrationTest extends CruiseControlIntegration
   private static final String TEST_USERNAME = "ccTestUser";
   private static final String TEST_PASSWORD = "TestPwd123";
   private static final String ORIGIN = "origin";
+  private static final String TEST_CORS_ORIGIN = "https://cruise-control.example.com";
   public static final String JWT_TOKEN_COOKIE_NAME = "jwt_token";
 
   private final TokenGenerator.TokenAndKeys _tokenAndKeys;
   private final Server _tokenProviderServer;
   private final File _publicKeyFile;
 
-  class TestAuthenticatorHandler extends AbstractHandler {
+  class TestAuthenticatorHandler extends Handler.Abstract {
 
     private final HashLoginService _loginService;
 
     TestAuthenticatorHandler() {
       _loginService = new HashLoginService();
-      _loginService.setConfig(
-          Objects.requireNonNull(this.getClass().getClassLoader().getResource(BASIC_AUTH_CREDENTIALS_FILE)).getPath());
+      URL resourceUrl = Objects.requireNonNull(this.getClass().getClassLoader().getResource(BASIC_AUTH_CREDENTIALS_FILE));
+      ResourceHandler rh = new ResourceHandler();
+      _loginService.setConfig(ResourceFactory.of(rh).newResource(resourceUrl));
     }
 
     @Override
-    public void handle(String target, Request baseRequest, HttpServletRequest request, HttpServletResponse response) throws IOException {
-      String username = request.getParameter(TEST_USERNAME_KEY);
-      String password = request.getParameter(TEST_PASSWORD_KEY);
+    public boolean handle(Request request, Response response, Callback callback) throws Exception {
+      Fields params = Request.getParameters(request);
+      String username = params.getValue(TEST_USERNAME_KEY);
+      String password = params.getValue(TEST_PASSWORD_KEY);
 
-      String cruiseControlUrl = request.getParameter(ORIGIN);
+      String cruiseControlUrl = params.getValue(ORIGIN);
 
       System.out.println(String.format("Handling login: %s %s %s", username, password, cruiseControlUrl));
-      UserIdentity identity = _loginService.login(username, password, request);
+      UserIdentity identity = _loginService.login(username, password, request, null);
       if (identity != null) {
-        response.addCookie(new Cookie(JWT_TOKEN_COOKIE_NAME, _tokenAndKeys.token()));
+        Response.addCookie(response, HttpCookie.from(JWT_TOKEN_COOKIE_NAME, _tokenAndKeys.token()));
+        response.setStatus(HttpServletResponse.SC_OK);
+        callback.succeeded();
       } else {
-        response.sendError(HttpServletResponse.SC_FORBIDDEN);
+        Response.writeError(request, response, callback, HttpServletResponse.SC_FORBIDDEN);
       }
+      return true;
     }
 
     @Override
@@ -103,7 +114,7 @@ public class JwtSecurityProviderIntegrationTest extends CruiseControlIntegration
   public JwtSecurityProviderIntegrationTest() throws Exception {
     _tokenAndKeys = TokenGenerator.generateToken(TEST_USERNAME);
     _publicKeyFile = createCertificate(_tokenAndKeys);
-    _tokenProviderServer = new Server(0);
+    _tokenProviderServer = new Server(new InetSocketAddress("127.0.0.1", 0));
     _tokenProviderServer.setHandler(new TestAuthenticatorHandler());
   }
 
@@ -138,6 +149,8 @@ public class JwtSecurityProviderIntegrationTest extends CruiseControlIntegration
         Objects.requireNonNull(this.getClass().getClassLoader().getResource(AUTH_CREDENTIALS_FILE)).getPath());
     securityConfigs.put(WebServerConfig.JWT_COOKIE_NAME_CONFIG, JWT_TOKEN_COOKIE_NAME);
     securityConfigs.put(WebServerConfig.JWT_AUTH_CERTIFICATE_LOCATION_CONFIG, _publicKeyFile.getAbsolutePath());
+    securityConfigs.put(WebServerConfig.WEBSERVER_HTTP_CORS_ENABLED_CONFIG, true);
+    securityConfigs.put(WebServerConfig.WEBSERVER_HTTP_CORS_ORIGIN_CONFIG, TEST_CORS_ORIGIN);
 
     return securityConfigs;
   }
@@ -151,6 +164,27 @@ public class JwtSecurityProviderIntegrationTest extends CruiseControlIntegration
         .resolve(CRUISE_CONTROL_STATE_ENDPOINT).toURL().openConnection();
     stateEndpointConnection.setRequestProperty(HttpHeader.COOKIE.asString(), cookie);
     assertEquals(HttpServletResponse.SC_OK, stateEndpointConnection.getResponseCode());
+  }
+
+  @Test
+  public void testCorsPreflightDoesNotRequireAuthentication() throws Exception {
+    HttpURLConnection connection = (HttpURLConnection) new URI(_app.serverUrl())
+        .resolve(CRUISE_CONTROL_STATE_ENDPOINT).toURL().openConnection();
+    connection.setRequestMethod("OPTIONS");
+    connection.setRequestProperty("Origin", TEST_CORS_ORIGIN);
+    connection.setRequestProperty("Access-Control-Request-Method", "GET");
+
+    assertEquals(HttpServletResponse.SC_OK, connection.getResponseCode());
+    assertEquals(TEST_CORS_ORIGIN, connection.getHeaderField("Access-Control-Allow-Origin"));
+  }
+
+  @Test
+  public void testUnauthenticatedGetRedirectsToLogin() throws Exception {
+    HttpURLConnection connection = (HttpURLConnection) new URI(_app.serverUrl())
+        .resolve(CRUISE_CONTROL_STATE_ENDPOINT).toURL().openConnection();
+    connection.setInstanceFollowRedirects(false);
+
+    assertEquals(HttpServletResponse.SC_FOUND, connection.getResponseCode());
   }
 
   private File createCertificate(TokenGenerator.TokenAndKeys tokenAndKeys) throws Exception {

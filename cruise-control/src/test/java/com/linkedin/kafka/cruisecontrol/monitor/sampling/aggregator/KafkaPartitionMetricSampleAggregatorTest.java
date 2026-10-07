@@ -31,7 +31,6 @@ import org.apache.kafka.clients.Metadata;
 import org.apache.kafka.common.Cluster;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.protocol.Errors;
-import org.apache.kafka.common.record.RecordBatch;
 import org.apache.kafka.common.requests.MetadataResponse;
 import org.junit.Test;
 import java.util.Collections;
@@ -48,6 +47,7 @@ import static com.linkedin.kafka.cruisecontrol.monitor.MonitorUnitTestUtils.getC
 import static com.linkedin.kafka.cruisecontrol.monitor.MonitorUnitTestUtils.getMetadata;
 import static com.linkedin.kafka.cruisecontrol.monitor.MonitorUnitTestUtils.NODE_0;
 import static com.linkedin.kafka.cruisecontrol.monitor.MonitorUnitTestUtils.nodeIds;
+import static com.linkedin.kafka.cruisecontrol.monitor.MonitorUnitTestUtils.NO_PARTITION_LEADER_EPOCH;
 import static com.linkedin.kafka.cruisecontrol.monitor.MonitorUtils.UNIT_INTERVAL_TO_PERCENTAGE;
 import static com.linkedin.kafka.cruisecontrol.monitor.metricdefinition.KafkaMetricDef.CPU_USAGE;
 import static com.linkedin.kafka.cruisecontrol.monitor.metricdefinition.KafkaMetricDef.DISK_USAGE;
@@ -129,7 +129,7 @@ public class KafkaPartitionMetricSampleAggregatorTest {
                                                          false,
                                                          Collections.singletonList(new MetadataResponse.PartitionMetadata(
                                                              Errors.NONE, TP, Optional.of(NODE_0.id()),
-                                                             Optional.of(RecordBatch.NO_PARTITION_LEADER_EPOCH),
+                                                             Optional.of(NO_PARTITION_LEADER_EPOCH),
                                                              nodeIds(), nodeIds(),
                                                              Collections.emptyList()))));
     topicMetadata.add(new MetadataResponse.TopicMetadata(Errors.NONE,
@@ -137,7 +137,7 @@ public class KafkaPartitionMetricSampleAggregatorTest {
                                                          false,
                                                          Collections.singletonList(new MetadataResponse.PartitionMetadata(
                                                              Errors.NONE, tp1, Optional.of(NODE_0.id()),
-                                                             Optional.of(RecordBatch.NO_PARTITION_LEADER_EPOCH),
+                                                             Optional.of(NO_PARTITION_LEADER_EPOCH),
                                                              nodeIds(), nodeIds(),
                                                              Collections.emptyList()))));
 
@@ -182,7 +182,7 @@ public class KafkaPartitionMetricSampleAggregatorTest {
 
     List<MetadataResponse.PartitionMetadata> partitionMetadata =
         Collections.singletonList(new MetadataResponse.PartitionMetadata(Errors.NONE, tp1, Optional.of(NODE_0.id()),
-                                                                         Optional.of(RecordBatch.NO_PARTITION_LEADER_EPOCH),
+                                                                         Optional.of(NO_PARTITION_LEADER_EPOCH),
                                                                          nodeIds(), nodeIds(), Collections.emptyList()));
     List<MetadataResponse.TopicMetadata> topicMetadata = Collections.singletonList(
         new MetadataResponse.TopicMetadata(Errors.NONE, TOPIC0, false, partitionMetadata));

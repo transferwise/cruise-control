@@ -129,7 +129,7 @@ public enum RawMetricType {
   }
 
   public static Map<Byte, Set<RawMetricType>> brokerMetricTypesDiffByVersion() {
-    return BROKER_METRIC_TYPES_DIFF_BY_VERSION;
+    return Collections.unmodifiableMap(BROKER_METRIC_TYPES_DIFF_BY_VERSION);
   }
 
   public static Set<RawMetricType> brokerMetricTypesDiffForVersion(byte version) {

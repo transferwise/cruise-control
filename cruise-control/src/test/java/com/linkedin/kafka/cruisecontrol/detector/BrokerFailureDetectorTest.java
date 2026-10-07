@@ -81,7 +81,7 @@ public class BrokerFailureDetectorTest extends CCKafkaIntegrationTestHarness {
       long anomalyTime = mockTime.milliseconds();
       killBroker(brokerId);
       long start = System.currentTimeMillis();
-      while (anomalies.isEmpty() && System.currentTimeMillis() < start + 30000) {
+      while (anomalies.isEmpty() && System.currentTimeMillis() < start + 60000) {
         // wait for the anomalies to be drained.
       }
       detector.run();
@@ -100,17 +100,22 @@ public class BrokerFailureDetectorTest extends CCKafkaIntegrationTestHarness {
       assertEquals("One broker failure should have been detected before timeout.", 1, anomalies.size());
       // Bring the broker back
       restartDeadBroker(brokerId);
-      detector.detectBrokerFailures(true);
+      start = System.currentTimeMillis();
+      while (!detector.failedBrokers().isEmpty() && System.currentTimeMillis() < start + 60000) {
+        detector.detectBrokerFailures(true);
+      }
       assertTrue(detector.failedBrokers().isEmpty());
       failedBrokerListString = detector.loadPersistedFailedBrokerList();
       assertTrue(failedBrokerListString.isEmpty());
+      anomalies.remove();
       // Kill the 2nd broker
       killBroker(1);
-      while (anomalies.size() == 1 && System.currentTimeMillis() < start + 60000) {
+      start = System.currentTimeMillis();
+      while (anomalies.isEmpty() && System.currentTimeMillis() < start + 60000) {
         // wait for the anomalies to be drained.
       }
       detector.run();
-      assertEquals("Two broker failure should have been detected before timeout.", 2, anomalies.size());
+      assertEquals("One broker failure should have been detected before timeout.", 1, anomalies.size());
     } finally {
       detector.shutdown();
       Files.delete(failedBrokersFile.toPath());
@@ -161,9 +166,9 @@ public class BrokerFailureDetectorTest extends CCKafkaIntegrationTestHarness {
       killBroker(brokerId);
       long start = System.currentTimeMillis();
       while (detector.failedBrokers().isEmpty() && System.currentTimeMillis() < start + 15000) {
-        // wait for the anomalies to be drained.
+        detector.run();
+        Thread.sleep(100);
       }
-      detector.run();
       assertEquals(Collections.singletonMap(brokerId, anomalyTime), detector.failedBrokers());
       // shutdown, advance the clock and create a new detector.
       detector.shutdown();

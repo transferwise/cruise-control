@@ -6,7 +6,7 @@ package com.linkedin.kafka.cruisecontrol.executor;
 
 import com.codahale.metrics.MetricRegistry;
 import com.linkedin.kafka.cruisecontrol.KafkaCruiseControlUnitTestUtils;
-import com.linkedin.kafka.cruisecontrol.common.MetadataClient;
+import com.linkedin.kafka.cruisecontrol.common.MetadataAdminClient;
 import com.linkedin.kafka.cruisecontrol.config.KafkaCruiseControlConfig;
 import com.linkedin.kafka.cruisecontrol.detector.AnomalyDetectorManager;
 import com.linkedin.kafka.cruisecontrol.model.ReplicaPlacementInfo;
@@ -97,7 +97,7 @@ public class IntraBrokerValidationDrainTest {
     Set<ExecutionTask> running = new HashSet<>(Set.of(active));
     KafkaCruiseControlConfig config = new KafkaCruiseControlConfig(KafkaCruiseControlUnitTestUtils.getKafkaCruiseControlProperties());
     AdminClient admin = EasyMock.strictMock(AdminClient.class);
-    MetadataClient metadata = EasyMock.niceMock(MetadataClient.class);
+    MetadataAdminClient metadata = EasyMock.niceMock(MetadataAdminClient.class);
     ExecutionTaskManager manager = EasyMock.niceMock(ExecutionTaskManager.class);
     EasyMock.expect(manager.numRemainingIntraBrokerPartitionMovements()).andReturn(1);
     EasyMock.expect(manager.getIntraBrokerReplicaMovementTasks()).andReturn(List.of(rejected));
@@ -129,7 +129,7 @@ public class IntraBrokerValidationDrainTest {
     Node node = new Node(1, "localhost", 9092);
     Cluster cluster = new Cluster("test", List.of(node),
         List.of(new PartitionInfo("topic", 0, node, new Node[]{node}, new Node[]{node})), Set.of(), Set.of());
-    EasyMock.expect(metadata.refreshMetadata()).andReturn(new MetadataClient.ClusterAndGeneration(cluster, 0)).anyTimes();
+    EasyMock.expect(metadata.cluster()).andReturn(cluster).anyTimes();
     Config empty = new Config(List.of());
     Config throttled = new Config(List.of(new ConfigEntry(THROTTLE, "1000")));
     configs(admin, empty);
@@ -152,12 +152,8 @@ public class IntraBrokerValidationDrainTest {
     admin.close();
     EasyMock.expectLastCall();
     EasyMock.replay(admin, metadata, manager);
-    Executor executor = new Executor(config, Time.SYSTEM, new MetricRegistry(), metadata,
+    Executor executor = new Executor(config, Time.SYSTEM, new MetricRegistry(), admin, metadata,
         EasyMock.niceMock(ExecutorNotifier.class), EasyMock.niceMock(AnomalyDetectorManager.class));
-    Field adminField = Executor.class.getDeclaredField("_adminClient");
-    adminField.setAccessible(true);
-    ((AdminClient) adminField.get(executor)).close();
-    setField(executor, "_adminClient", admin);
     setField(executor, "_executionTaskManager", manager);
     setField(executor, "_executionProgressCheckIntervalMs", 1L);
     setField(executor, "_reasonSupplier", (java.util.function.Supplier<String>) () -> "test");
