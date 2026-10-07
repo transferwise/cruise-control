@@ -52,6 +52,7 @@ public final class TestConstants {
                    + "com.linkedin.kafka.cruisecontrol.analyzer.goals.NetworkInboundUsageDistributionGoal,"
                    + "com.linkedin.kafka.cruisecontrol.analyzer.goals.NetworkOutboundUsageDistributionGoal,"
                    + "com.linkedin.kafka.cruisecontrol.analyzer.goals.CpuUsageDistributionGoal,"
+                   + "com.linkedin.kafka.cruisecontrol.analyzer.goals.LeaderCpuUsageDistributionGoal,"
                    + "com.linkedin.kafka.cruisecontrol.analyzer.goals.TopicReplicaDistributionGoal,"
                    + "com.linkedin.kafka.cruisecontrol.analyzer.goals.LeaderReplicaDistributionGoal,"
                    + "com.linkedin.kafka.cruisecontrol.analyzer.goals.LeaderBytesInDistributionGoal";

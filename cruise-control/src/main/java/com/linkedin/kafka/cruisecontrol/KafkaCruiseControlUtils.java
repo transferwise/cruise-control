@@ -6,6 +6,7 @@ package com.linkedin.kafka.cruisecontrol;
 
 import com.linkedin.kafka.cruisecontrol.analyzer.AnalyzerUtils;
 import com.linkedin.kafka.cruisecontrol.analyzer.goals.Goal;
+import com.linkedin.kafka.cruisecontrol.analyzer.goals.LeaderCpuUsageDistributionGoal;
 import com.linkedin.kafka.cruisecontrol.analyzer.goals.PreferredLeaderElectionGoal;
 import com.linkedin.kafka.cruisecontrol.config.KafkaCruiseControlConfig;
 import com.linkedin.kafka.cruisecontrol.config.constants.AnalyzerConfig;
@@ -404,11 +405,13 @@ public final class KafkaCruiseControlUtils {
    *   <li>{@link #sanityCheckNonExistingGoal} is not violated.</li>
    * </ul>
    *
-   * There are two scenarios where this check is skipped.
+   * There are three scenarios where this check is skipped.
    * <ul>
    *   <li> {@code goals} is {@code null} or empty -- i.e. even if hard goals are excluded from the default goals, this
    *   check will pass</li>
    *   <li> {@code goals} only has {@link PreferredLeaderElectionGoal}, denotes it is a PLE request.</li>
+   *   <li> {@code goals} only has {@link LeaderCpuUsageDistributionGoal}, denotes it is a leadership-only CPU rebalance
+   *   request.</li>
    * </ul>
    *
    * @param goals A list of goal names (i.e. each matching {@link Goal#name()}) to check.
@@ -416,8 +419,15 @@ public final class KafkaCruiseControlUtils {
    * @param config The configurations for Cruise Control.
    */
   public static void sanityCheckGoals(List<String> goals, boolean skipHardGoalCheck, KafkaCruiseControlConfig config) {
+    boolean isPreferredLeaderElectionRequest = isSingleGoalRequest(goals, PreferredLeaderElectionGoal.class.getSimpleName());
+    boolean isLeaderCpuUsageDistributionRequest = isSingleGoalRequest(goals, LeaderCpuUsageDistributionGoal.class.getSimpleName());
+    if (goals != null && goals.stream().anyMatch(goal -> goal.equalsIgnoreCase(LeaderCpuUsageDistributionGoal.class.getSimpleName()))
+        && !isLeaderCpuUsageDistributionRequest) {
+      throw new IllegalArgumentException(String.format("%s must be the only goal in the provided goals: %s.",
+                                                       LeaderCpuUsageDistributionGoal.class.getSimpleName(), goals));
+    }
     if (goals != null && !goals.isEmpty() && !skipHardGoalCheck
-        && !(goals.size() == 1 && goals.get(0).equals(PreferredLeaderElectionGoal.class.getSimpleName()))) {
+        && !isPreferredLeaderElectionRequest && !isLeaderCpuUsageDistributionRequest) {
       sanityCheckNonExistingGoal(goals, AnalyzerUtils.getCaseInsensitiveGoalsByName(config));
       Set<String> hardGoals = hardGoals(config);
       if (!goals.containsAll(hardGoals)) {
@@ -426,6 +436,10 @@ public final class KafkaCruiseControlUtils {
                                                          SKIP_HARD_GOAL_CHECK_PARAM));
       }
     }
+  }
+
+  private static boolean isSingleGoalRequest(List<String> goals, String goalName) {
+    return goals != null && goals.size() == 1 && goals.get(0).equalsIgnoreCase(goalName);
   }
 
   /**

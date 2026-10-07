@@ -1770,8 +1770,15 @@ public class Executor {
         }
       } finally {
         try {
+          // Kafka continues submitted disk moves independently even if a later batch fails.
+          // Restore broker configs only after all submitted moves have a known terminal state.
+          while (!inExecutionTasks().isEmpty()) {
+            LOG.info("User task {}: Waiting for {} intra-broker disk move(s) before final throttle cleanup.",
+                     _uuid, inExecutionTasks().size());
+            waitForIntraBrokerReplicaTasksToFinish();
+          }
           throttleHelper.clearAllThrottles();
-        } catch (ExecutionException | InterruptedException | TimeoutException | IllegalStateException e) {
+        } catch (ExecutionException | InterruptedException | TimeoutException | RuntimeException e) {
           LOG.error("User task {}: Failed to clear intra-broker replication throttles during cleanup. "
                     + "Broker config {} may remain active on participating brokers and require manual removal.",
                     _uuid, IntraBrokerReplicationThrottleHelper.REPLICA_ALTER_LOG_DIRS_IO_MAX_BYTES_PER_SECOND_CONFIG, e);
@@ -2209,15 +2216,11 @@ public class Executor {
                 LOG.warn("User task {}: Killing execution for task {} because the destination disk is down "
                     + "(non-retriable logdir error).", _uuid, task);
                 return true;
-              } else if (_stopSignal.get() != NO_STOP_EXECUTION) {
-                // During stop-wait, absence from logdir map with no non-retriable error is likely a
-                // transient query failure. Leave in-progress so the poll loop keeps checking.
-                LOG.debug("User task {}: Logdir info unavailable for task {} during stop-wait (transient). "
-                    + "Leaving in-progress to avoid premature throttle removal.", _uuid, task);
               } else {
-                _executionTaskManager.markTaskDead(task);
-                LOG.warn("User task {}: Killing execution for task {} because the destination disk is down.", _uuid, task);
-                return true;
+                // Missing logdir info without a non-retriable error is an unknown state during
+                // both normal execution and stop-wait. Keep polling before removing throttles.
+                LOG.debug("User task {}: Logdir info unavailable for task {} (transient). "
+                    + "Leaving in-progress to avoid premature throttle removal.", _uuid, task);
               }
             }
             break;
@@ -2312,8 +2315,13 @@ public class Executor {
             LOG.debug("User task {}: Unknown state tasks: {}", _uuid, unknownState);
           }
         } else {
-          LOG.info("User task {}: Reexecuting tasks {}", _uuid, intraBrokerReplicaTasksToReexecute);
-          executeIntraBrokerReplicaMovements(intraBrokerReplicaTasksToReexecute, _adminClient, _executionTaskManager, _config);
+          // A failed state query does not prove that the original submission needs retrying.
+          // Resubmitting an unknown copy could itself fail transiently and mark the task dead.
+          intraBrokerReplicaTasksToReexecute.removeIf(task -> !logDirInfo.containsKey(task));
+          if (!intraBrokerReplicaTasksToReexecute.isEmpty()) {
+            LOG.info("User task {}: Reexecuting tasks {}", _uuid, intraBrokerReplicaTasksToReexecute);
+            executeIntraBrokerReplicaMovements(intraBrokerReplicaTasksToReexecute, _adminClient, _executionTaskManager, _config);
+          }
         }
       }
     }

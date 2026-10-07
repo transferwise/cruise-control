@@ -4,6 +4,10 @@
 
 package com.linkedin.kafka.cruisecontrol;
 
+import com.linkedin.kafka.cruisecontrol.analyzer.goals.CpuUsageDistributionGoal;
+import com.linkedin.kafka.cruisecontrol.analyzer.goals.LeaderCpuUsageDistributionGoal;
+import com.linkedin.kafka.cruisecontrol.config.KafkaCruiseControlConfig;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.Map;
 import java.util.concurrent.ExecutionException;
@@ -19,8 +23,10 @@ import org.junit.Test;
 
 import static com.linkedin.kafka.cruisecontrol.KafkaCruiseControlUtils.CLIENT_REQUEST_TIMEOUT_MS;
 import static com.linkedin.kafka.cruisecontrol.KafkaCruiseControlUtils.createTopic;
+import static com.linkedin.kafka.cruisecontrol.KafkaCruiseControlUtils.sanityCheckGoals;
 import static com.linkedin.kafka.cruisecontrol.KafkaCruiseControlUtils.wrapTopic;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 
 
@@ -55,5 +61,19 @@ public class KafkaCruiseControlUtilsTest {
 
     assertTrue(createTopic(adminClient, TEST_TOPIC));
     EasyMock.verify(adminClient, createTopicsResult, createTopicsResultFuture);
+  }
+
+  @Test
+  public void testLeaderCpuUsageDistributionGoalMustBeUsedAlone() {
+    KafkaCruiseControlConfig config =
+        new KafkaCruiseControlConfig(KafkaCruiseControlUnitTestUtils.getKafkaCruiseControlProperties());
+    String leaderCpuUsageDistributionGoal = LeaderCpuUsageDistributionGoal.class.getSimpleName();
+
+    sanityCheckGoals(Collections.singletonList(leaderCpuUsageDistributionGoal), false, config);
+
+    IllegalArgumentException exception = assertThrows(IllegalArgumentException.class,
+        () -> sanityCheckGoals(Arrays.asList(leaderCpuUsageDistributionGoal, CpuUsageDistributionGoal.class.getSimpleName()),
+                               true, config));
+    assertTrue(exception.getMessage().contains("must be the only goal"));
   }
 }

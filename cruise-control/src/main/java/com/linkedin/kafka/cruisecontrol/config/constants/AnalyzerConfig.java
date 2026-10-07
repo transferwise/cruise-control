@@ -14,6 +14,7 @@ import com.linkedin.kafka.cruisecontrol.analyzer.goals.DiskUsageDistributionGoal
 import com.linkedin.kafka.cruisecontrol.analyzer.goals.IntraBrokerDiskCapacityGoal;
 import com.linkedin.kafka.cruisecontrol.analyzer.goals.IntraBrokerDiskUsageDistributionGoal;
 import com.linkedin.kafka.cruisecontrol.analyzer.goals.LeaderBytesInDistributionGoal;
+import com.linkedin.kafka.cruisecontrol.analyzer.goals.LeaderCpuUsageDistributionGoal;
 import com.linkedin.kafka.cruisecontrol.analyzer.goals.LeaderReplicaDistributionGoal;
 import com.linkedin.kafka.cruisecontrol.analyzer.goals.MinTopicLeadersPerBrokerGoal;
 import com.linkedin.kafka.cruisecontrol.analyzer.goals.NetworkInboundCapacityGoal;
@@ -272,6 +273,7 @@ public final class AnalyzerConfig {
                                                                   .add(NetworkInboundUsageDistributionGoal.class.getName())
                                                                   .add(NetworkOutboundUsageDistributionGoal.class.getName())
                                                                   .add(CpuUsageDistributionGoal.class.getName())
+                                                                  .add(LeaderCpuUsageDistributionGoal.class.getName())
                                                                   .add(LeaderReplicaDistributionGoal.class.getName())
                                                                   .add(LeaderBytesInDistributionGoal.class.getName())
                                                                   .add(TopicReplicaDistributionGoal.class.getName())

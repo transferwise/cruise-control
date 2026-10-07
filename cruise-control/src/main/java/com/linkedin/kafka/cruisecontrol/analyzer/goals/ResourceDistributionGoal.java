@@ -355,7 +355,7 @@ public abstract class ResourceDistributionGoal extends AbstractGoal {
    * @param broker Broker to check for exclusion from replica moves.
    * @return {@code true} if the given broker is excluded for replica moves, {@code false} otherwise.
    */
-  private boolean isExcludedForReplicaMove(Broker broker) {
+  protected boolean isExcludedForReplicaMove(Broker broker) {
     return !_brokersAllowedReplicaMove.contains(broker.id());
   }
 
@@ -434,12 +434,12 @@ public abstract class ResourceDistributionGoal extends AbstractGoal {
     }
   }
 
-  private boolean rebalanceByMovingLoadIn(Broker broker,
-                                          ClusterModel clusterModel,
-                                          Set<Goal> optimizedGoals,
-                                          ActionType actionType,
-                                          OptimizationOptions optimizationOptions,
-                                          boolean moveImmigrantsOnly) {
+  protected boolean rebalanceByMovingLoadIn(Broker broker,
+                                            ClusterModel clusterModel,
+                                            Set<Goal> optimizedGoals,
+                                            ActionType actionType,
+                                            OptimizationOptions optimizationOptions,
+                                            boolean moveImmigrantsOnly) {
     long moveStartTimeMs = System.currentTimeMillis();
     if (!clusterModel.newBrokers().isEmpty() && !broker.isNew()) {
       // We have new brokers and the current broker is not a new broker.
@@ -776,11 +776,11 @@ public abstract class ResourceDistributionGoal extends AbstractGoal {
     return true;
   }
 
-  private boolean rebalanceByMovingLoadOut(Broker broker,
-                                           ClusterModel clusterModel,
-                                           Set<Goal> optimizedGoals,
-                                           ActionType actionType,
-                                           OptimizationOptions optimizationOptions) {
+  protected boolean rebalanceByMovingLoadOut(Broker broker,
+                                             ClusterModel clusterModel,
+                                             Set<Goal> optimizedGoals,
+                                             ActionType actionType,
+                                             OptimizationOptions optimizationOptions) {
     long moveStartTimeMs = System.currentTimeMillis();
     Set<String> excludedTopics = optimizationOptions.excludedTopics();
     // Get the eligible brokers.
@@ -862,12 +862,12 @@ public abstract class ResourceDistributionGoal extends AbstractGoal {
     return !broker.replicas().isEmpty();
   }
 
-  private boolean isLoadAboveBalanceLowerLimit(Broker broker) {
+  protected boolean isLoadAboveBalanceLowerLimit(Broker broker) {
     // The action does not matter here because the load is null.
     return isLoadAboveBalanceLowerLimitAfterChange(null, broker, ADD);
   }
 
-  private boolean isLoadUnderBalanceUpperLimit(Broker broker) {
+  protected boolean isLoadUnderBalanceUpperLimit(Broker broker) {
     // The action does not matter here because the load is null.
     return isLoadUnderBalanceUpperLimitAfterChange(null, broker, REMOVE);
   }

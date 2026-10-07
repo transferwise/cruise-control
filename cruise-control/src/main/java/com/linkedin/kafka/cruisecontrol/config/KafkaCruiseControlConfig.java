@@ -5,6 +5,7 @@
 package com.linkedin.kafka.cruisecontrol.config;
 
 import com.linkedin.cruisecontrol.common.CruiseControlConfigurable;
+import com.linkedin.kafka.cruisecontrol.analyzer.goals.LeaderCpuUsageDistributionGoal;
 import com.linkedin.kafka.cruisecontrol.config.constants.AnalyzerConfig;
 import com.linkedin.kafka.cruisecontrol.config.constants.AnomalyDetectorConfig;
 import com.linkedin.kafka.cruisecontrol.config.constants.CruiseControlParametersConfig;
@@ -36,6 +37,7 @@ import org.apache.kafka.common.config.ConfigException;
  */
 public class KafkaCruiseControlConfig extends AbstractConfig {
   private static final ConfigDef CONFIG;
+  private static final String LEADER_CPU_USAGE_DISTRIBUTION_GOAL = LeaderCpuUsageDistributionGoal.class.getSimpleName();
 
   static {
     CONFIG = CruiseControlRequestConfig.define(CruiseControlParametersConfig.define(AnomalyDetectorConfig.define(
@@ -131,6 +133,7 @@ public class KafkaCruiseControlConfig extends AbstractConfig {
    *   <li>{@link AnalyzerConfig#HARD_GOALS_CONFIG} is a subset of {@link AnalyzerConfig#DEFAULT_GOALS_CONFIG}.</li>
    *   <li>{@link AnomalyDetectorConfig#SELF_HEALING_GOALS_CONFIG} is a subset of {@link AnalyzerConfig#DEFAULT_GOALS_CONFIG}.</li>
    *   <li>{@link AnomalyDetectorConfig#ANOMALY_DETECTION_GOALS_CONFIG} is a sublist of {@link AnalyzerConfig#DEFAULT_GOALS_CONFIG} otherwise.</li>
+   *   <li>{@link LeaderCpuUsageDistributionGoal} is not configured in any default, hard, self-healing, or anomaly detection goal list.</li>
    * </ul>
    */
   private void sanityCheckGoalNames() {
@@ -171,6 +174,7 @@ public class KafkaCruiseControlConfig extends AbstractConfig {
     if (defaultGoalNames.isEmpty()) {
       throw new ConfigException("Attempt to configure default goals configuration with an empty list of goals.");
     }
+    sanityCheckStandaloneGoalNotConfigured(defaultGoalNames, AnalyzerConfig.DEFAULT_GOALS_CONFIG);
 
     // Ensure that default goals are supported inter-broker or intra-broker goals.
     if (defaultGoalNames.stream().anyMatch(g -> !interBrokerGoalNames.contains(g) && !intraBrokerGoalNames.contains(g))) {
@@ -182,6 +186,7 @@ public class KafkaCruiseControlConfig extends AbstractConfig {
 
     // Ensure that hard goals are contained in default goals.
     List<String> hardGoalNames = getList(AnalyzerConfig.HARD_GOALS_CONFIG);
+    sanityCheckStandaloneGoalNotConfigured(hardGoalNames, AnalyzerConfig.HARD_GOALS_CONFIG);
     if (hardGoalNames.stream().anyMatch(g -> !defaultGoalNames.contains(g))) {
       throw new ConfigException(String.format("Attempt to configure hard goals with unsupported goals (%s:%s and %s:%s).",
                                               AnalyzerConfig.HARD_GOALS_CONFIG, hardGoalNames,
@@ -190,11 +195,16 @@ public class KafkaCruiseControlConfig extends AbstractConfig {
 
     // Ensure that goals used for self-healing are contained in default goals.
     List<String> selfHealingGoalNames = getList(AnomalyDetectorConfig.SELF_HEALING_GOALS_CONFIG);
+    sanityCheckStandaloneGoalNotConfigured(selfHealingGoalNames, AnomalyDetectorConfig.SELF_HEALING_GOALS_CONFIG);
     if (selfHealingGoalNames.stream().anyMatch(g -> !defaultGoalNames.contains(g))) {
       throw new ConfigException(String.format("Attempt to configure self healing goals with unsupported goals (%s:%s and %s:%s).",
                                               AnomalyDetectorConfig.SELF_HEALING_GOALS_CONFIG, selfHealingGoalNames,
                                               AnalyzerConfig.DEFAULT_GOALS_CONFIG, defaultGoalNames));
     }
+
+    // Ensure that goals used for anomaly detection do not include standalone-only operation goals.
+    List<String> anomalyDetectionGoalNames = getList(AnomalyDetectorConfig.ANOMALY_DETECTION_GOALS_CONFIG);
+    sanityCheckStandaloneGoalNotConfigured(anomalyDetectionGoalNames, AnomalyDetectorConfig.ANOMALY_DETECTION_GOALS_CONFIG);
 
     // Ensure that intra-broker goals used for self-healing are contained in intra broker goals.
     List<String> selfHealingIntraBrokerGoalNames = getList(AnomalyDetectorConfig.SELF_HEALING_INTRA_BROKER_GOALS_CONFIG);
@@ -202,7 +212,19 @@ public class KafkaCruiseControlConfig extends AbstractConfig {
       throw new ConfigException(String.format("Attempt to configure self healing goals with unsupported goals (%s:%s and %s:%s).",
                                                AnomalyDetectorConfig.SELF_HEALING_INTRA_BROKER_GOALS_CONFIG, selfHealingIntraBrokerGoalNames,
                                                AnalyzerConfig.INTRA_BROKER_GOALS_CONFIG, intraBrokerGoalNames));
+      }
+  }
+
+  private static void sanityCheckStandaloneGoalNotConfigured(List<String> goalNames, String configName) {
+    if (goalNames.stream().anyMatch(KafkaCruiseControlConfig::isLeaderCpuUsageDistributionGoal)) {
+      throw new ConfigException(String.format("%s cannot be configured in %s. It must be requested as a standalone "
+                                              + "leadership-only CPU rebalance goal.",
+                                              LEADER_CPU_USAGE_DISTRIBUTION_GOAL, configName));
     }
+  }
+
+  private static boolean isLeaderCpuUsageDistributionGoal(String goalName) {
+    return goalName.replaceAll(".*\\.", "").equalsIgnoreCase(LEADER_CPU_USAGE_DISTRIBUTION_GOAL);
   }
 
   /**
