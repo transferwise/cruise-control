@@ -7,6 +7,7 @@ package com.linkedin.kafka.cruisecontrol.executor;
 import com.linkedin.cruisecontrol.monitor.sampling.aggregator.ValuesAndExtrapolations;
 import com.linkedin.kafka.cruisecontrol.common.TopicMinIsrCache.MinIsrWithTime;
 import com.linkedin.kafka.cruisecontrol.config.KafkaCruiseControlConfig;
+import com.linkedin.kafka.cruisecontrol.config.constants.AnalyzerConfig;
 import com.linkedin.kafka.cruisecontrol.config.constants.ExecutorConfig;
 import com.linkedin.kafka.cruisecontrol.executor.concurrency.ConcurrencyAdjustingRecommendation;
 import com.linkedin.kafka.cruisecontrol.model.ReplicaPlacementInfo;
@@ -16,6 +17,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -443,8 +445,34 @@ public final class ExecutionUtils {
    * @return The {@link AlterPartitionReassignmentsResult result} of reassignment request -- cannot be {@code null}.
    */
   public static AlterPartitionReassignmentsResult submitReplicaReassignmentTasks(AdminClient adminClient, List<ExecutionTask> tasks) {
+    if (validateNotNull(tasks, "Tasks to execute cannot be null.").stream().anyMatch(t -> t.state() == ExecutionTaskState.IN_PROGRESS
+        && !t.proposal().destinationDiskCapacityByBroker().isEmpty())) {
+      throw new IllegalArgumentException("Disk-aware submissions require the overload with configured threshold, timeout, and active tasks.");
+    }
+    return submitReplicaReassignmentTasks(adminClient, tasks, Collections.emptySet(),
+        AnalyzerConfig.DEFAULT_DISK_CAPACITY_THRESHOLD,
+        ExecutorConfig.DEFAULT_LOGDIR_RESPONSE_TIMEOUT_MS);
+  }
+
+  /**
+   * Submit tasks after checking live destination usage and reserving room for ongoing disk-aware copies.
+   * @param adminClient Kafka admin client
+   * @param tasks tasks to submit
+   * @param activeTasks all ongoing replica tasks
+   * @param diskCapacityThreshold maximum allowed disk utilization ratio
+   * @param logdirTimeoutMs log-directory request timeout in milliseconds
+   * @return reassignment submission result
+   */
+  public static AlterPartitionReassignmentsResult submitReplicaReassignmentTasks(AdminClient adminClient, List<ExecutionTask> tasks,
+                                                                                Collection<ExecutionTask> activeTasks,
+                                                                                double diskCapacityThreshold, long logdirTimeoutMs) {
     if (validateNotNull(tasks, "Tasks to execute cannot be null.").isEmpty()) {
       throw new IllegalArgumentException("Tasks to execute cannot be empty.");
+    }
+    try {
+      InterBrokerDiskCapacityValidator.prepare(adminClient, tasks, activeTasks, diskCapacityThreshold, logdirTimeoutMs);
+    } catch (RuntimeException e) {
+      throw new InterBrokerDiskCapacityValidator.ValidationException(e);
     }
 
     // Update the ongoing replica reassignments in case the task status has changed.

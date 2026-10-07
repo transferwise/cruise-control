@@ -75,6 +75,11 @@ public class ClusterModel implements Serializable {
   private final Map<Integer, Load> _potentialLeadershipLoadByBrokerId;
   private int _unknownHostId;
   private final Map<Integer, String> _capacityEstimationInfoByBrokerId;
+  private double _interBrokerDiskCapacityThreshold = -1;
+  private final Map<Integer, Map<String, Double>> _interBrokerDiskReservations = new HashMap<>();
+  private final Map<Replica, Disk> _plannedDiskReservations = new java.util.IdentityHashMap<>();
+  private final Map<Replica, Double> _plannedDiskReservationSizes = new java.util.IdentityHashMap<>();
+  private final Map<TopicPartition, Double> _reportedReplicaSizes = new HashMap<>();
 
   /**
    * Constructor for the cluster class. It creates data structures to hold a list of racks, a map for partitions by
@@ -111,6 +116,137 @@ public class ClusterModel implements Serializable {
     _monitoredPartitionsRatio = monitoredPartitionsRatio;
     _unknownHostId = 0;
     _capacityEstimationInfoByBrokerId = new HashMap<>();
+  }
+
+  /**
+   * Enable disk-aware moves after loading the model. Never credit space from proposed outgoing replicas.
+   * @param capacityThreshold maximum allowed disk utilization ratio
+   */
+  public void enableInterBrokerDiskCapacityCheck(double capacityThreshold) {
+    if (!Double.isFinite(capacityThreshold) || capacityThreshold < 0 || capacityThreshold > 1) {
+      throw new IllegalArgumentException("Disk capacity threshold must be in [0, 1].");
+    }
+    _plannedDiskReservations.clear();
+    _plannedDiskReservationSizes.clear();
+    for (Broker broker : aliveBrokers()) {
+      if (broker.disks().isEmpty()) {
+        throw new IllegalStateException("Missing log-directory capacity information for broker " + broker.id());
+      }
+      Map<String, Double> usage = new HashMap<>();
+      for (Disk disk : broker.disks()) {
+        if (disk.isAlive() && !Double.isFinite(disk.reportedUtilization())) {
+          throw new IllegalStateException("Missing live usage for log directory " + disk.logDir() + " on broker " + broker.id());
+        }
+        usage.put(disk.logDir(), Math.max(disk.utilization(), disk.reportedUtilization()));
+      }
+      _interBrokerDiskReservations.put(broker.id(), usage);
+    }
+    _interBrokerDiskCapacityThreshold = capacityThreshold;
+  }
+
+  public boolean interBrokerDiskCapacityCheckEnabled() {
+    return _interBrokerDiskCapacityThreshold >= 0;
+  }
+
+  /**
+   * Record the largest live replica size for a partition.
+   * @param tp partition
+   * @param sizeInMB observed replica size in MB
+   */
+  public void recordReplicaDiskSize(TopicPartition tp, double sizeInMB) {
+    if (!Double.isFinite(sizeInMB) || sizeInMB < 0) {
+      throw new IllegalArgumentException("Invalid replica disk size for " + tp);
+    }
+    _reportedReplicaSizes.merge(tp, sizeInMB, Math::max);
+  }
+
+  /**
+   * @param replica replica to size
+   * @return the larger of sampled and live replica size in MB
+   */
+  public double replicaDiskSize(Replica replica) {
+    return Math.max(replica.load().expectedUtilizationFor(Resource.DISK),
+                    _reportedReplicaSizes.getOrDefault(replica.topicPartition(), 0.0));
+  }
+
+  /**
+   * Choose the eligible disk with the lowest projected utilization ratio; log-directory order breaks ties.
+   * @param replica incoming replica
+   * @param destinationBroker destination broker
+   * @return selected disk, or null if no disk has sufficient capacity
+   */
+  public Disk destinationDisk(Replica replica, Broker destinationBroker) {
+    Disk bestDisk = null;
+    double bestRatio = Double.POSITIVE_INFINITY;
+    double size = Math.ceil(replicaDiskSize(replica));
+    Map<String, Double> reservations = _interBrokerDiskReservations.get(destinationBroker.id());
+    if (reservations == null || !Double.isFinite(size) || size < 0) {
+      return null;
+    }
+    for (Disk disk : destinationBroker.disks()) {
+      // Returning an original replica must preserve its disk, avoiding mixed intra/inter-broker proposals.
+      if (replica.originalBroker().id() == destinationBroker.id() && replica.originalDisk() != null
+          && disk != replica.originalDisk()) {
+        continue;
+      }
+      double projectedUsage = projectedDiskUsage(replica, disk, size);
+      if (disk.isAlive() && disk.capacity() > 0
+          && projectedUsage < disk.capacity() * _interBrokerDiskCapacityThreshold) {
+        double ratio = projectedUsage / disk.capacity();
+        if (ratio < bestRatio) {
+          bestDisk = disk;
+          bestRatio = ratio;
+        }
+      }
+    }
+    return bestDisk;
+  }
+
+  /**
+   * Check an explicitly selected disk without crediting space freed by planned outgoing copies.
+   * @param replica incoming replica
+   * @param destination destination disk
+   * @return whether the disk can accommodate the copy
+   */
+  public boolean canMoveReplicaToDisk(Replica replica, Disk destination) {
+    if (!interBrokerDiskCapacityCheckEnabled()) {
+      return true;
+    }
+    Map<String, Double> reservations = destination == null ? null : _interBrokerDiskReservations.get(destination.broker().id());
+    return reservations != null && destination.isAlive() && destination.capacity() > 0
+        && projectedDiskUsage(replica, destination, Math.ceil(replicaDiskSize(replica)))
+           < destination.capacity() * _interBrokerDiskCapacityThreshold;
+  }
+
+  private double projectedDiskUsage(Replica replica, Disk disk, double size) {
+    double usage = _interBrokerDiskReservations.get(disk.broker().id()).getOrDefault(disk.logDir(), Double.NaN);
+    if (_plannedDiskReservations.get(replica) == disk) {
+      usage -= _plannedDiskReservationSizes.get(replica);
+    }
+    return usage + (replica.originalDisk() == disk ? 0 : size);
+  }
+
+  private void releasePlannedDiskCopy(Replica replica) {
+    Disk previous = _plannedDiskReservations.remove(replica);
+    if (previous != null) {
+      double previousSize = _plannedDiskReservationSizes.remove(replica);
+      _interBrokerDiskReservations.get(previous.broker().id()).merge(previous.logDir(), -previousSize, Double::sum);
+    }
+  }
+
+  private void reserveDiskCopy(Replica replica, Disk destination, double size) {
+    releasePlannedDiskCopy(replica);
+    // Only the final destination will be executed. Release superseded planned copies, but never
+    // subtract the live source's files from the baseline: their deletion has not happened yet.
+    if (destination != replica.originalDisk()) {
+      _interBrokerDiskReservations.get(destination.broker().id()).merge(destination.logDir(), size, Double::sum);
+      _plannedDiskReservations.put(replica, destination);
+      _plannedDiskReservationSizes.put(replica, size);
+    }
+  }
+
+  public boolean canMoveReplicaToBroker(Replica replica, Broker destinationBroker) {
+    return !interBrokerDiskCapacityCheckEnabled() || destinationDisk(replica, destinationBroker) != null;
   }
 
   /**
@@ -361,8 +497,16 @@ public class ClusterModel implements Serializable {
    */
   public void relocateReplica(TopicPartition tp, int brokerId, String destinationLogdir) {
     Replica replicaToMove = _partitionsByTopicPartition.get(tp).replica(brokerId);
+    Disk destination = broker(brokerId).disk(destinationLogdir);
+    if (!canMoveReplicaToDisk(replicaToMove, destination)) {
+      throw new IllegalStateException("Destination log directory cannot accommodate " + tp + " on broker " + brokerId);
+    }
     // Move replica from the source disk to destination disk on the same broker.
     replicaToMove.broker().moveReplicaBetweenDisks(tp, replicaToMove.disk().logDir(), destinationLogdir);
+    if (interBrokerDiskCapacityCheckEnabled()) {
+      // Mixed goal sets must reserve intra-broker copies before considering later inter-broker moves.
+      reserveDiskCopy(replicaToMove, destination, Math.ceil(replicaDiskSize(replicaToMove)));
+    }
   }
 
   /**
@@ -378,12 +522,36 @@ public class ClusterModel implements Serializable {
    * @param destinationBrokerId     Destination broker id.
    */
   public void relocateReplica(TopicPartition tp, int sourceBrokerId, int destinationBrokerId) {
+    Replica replicaToMove = partition(tp).replica(sourceBrokerId);
+    Broker destinationBroker = broker(destinationBrokerId);
+    Disk destinationDisk = null;
+    if (interBrokerDiskCapacityCheckEnabled()) {
+      destinationDisk = destinationDisk(replicaToMove, broker(destinationBrokerId));
+      if (destinationDisk == null) {
+        throw new IllegalStateException("No destination log directory below disk capacity threshold for " + tp
+                                        + " on broker " + destinationBrokerId);
+      }
+    } else if (!destinationBroker.disks().isEmpty()) {
+      // Preserve the old directory when available, while keeping disk membership valid for JBOD models.
+      destinationDisk = replicaToMove.disk() == null ? null : destinationBroker.disk(replicaToMove.disk().logDir());
+      if (destinationDisk == null || !destinationDisk.isAlive()) {
+        destinationDisk = destinationBroker.disks().stream().filter(Disk::isAlive)
+            .min(java.util.Comparator.comparingDouble(Disk::utilization).thenComparing(Disk::logDir)).orElse(null);
+      }
+    }
     // Removes the replica and related load from the source broker / source rack / cluster.
     Replica replica = removeReplica(sourceBrokerId, tp);
     if (replica == null) {
       throw new IllegalArgumentException("Replica is not in the cluster.");
     }
     // Updates the broker of the removed replica with destination broker.
+    if (replica.disk() != null) {
+      replica.disk().removeReplica(replica);
+    }
+    if (interBrokerDiskCapacityCheckEnabled()) {
+      reserveDiskCopy(replica, destinationDisk, Math.ceil(replicaDiskSize(replica)));
+    }
+    replica.setDisk(destinationDisk);
     replica.setBroker(broker(destinationBrokerId));
 
     // Add this replica and related load to the destination broker / destination rack / cluster.
@@ -860,6 +1028,17 @@ public class ClusterModel implements Serializable {
     } else {
       replica = new Replica(tp, GENESIS_BROKER, false);
       replica.setBroker(broker);
+      if (interBrokerDiskCapacityCheckEnabled()) {
+        // Future replicas may stay on their initial broker throughout optimization. Give them a
+        // disk now, using the existing leader's size before this replica's load is populated.
+        Replica leader = partition(tp).leader();
+        Disk destination = destinationDisk(leader, broker);
+        if (destination == null) {
+          throw new IllegalStateException("No disk has capacity for new replica " + tp + " on broker " + brokerId);
+        }
+        replica.setDisk(destination);
+        reserveDiskCopy(replica, destination, Math.ceil(replicaDiskSize(leader)));
+      }
     }
     rack(rackId).addReplica(replica);
     // Increment the number of replicas per this topic.
@@ -909,7 +1088,13 @@ public class ClusterModel implements Serializable {
       throw new IllegalStateException(String.format("Unable to delete replica for topic partition %s since it only has %d replicas.",
                                                     topicPartition, currentReplicaCount));
     }
-    removeReplica(brokerId, topicPartition);
+    Replica deleted = removeReplica(brokerId, topicPartition);
+    if (deleted != null) {
+      releasePlannedDiskCopy(deleted);
+      if (deleted.disk() != null) {
+        deleted.disk().removeReplica(deleted);
+      }
+    }
     // Update partition info.
     Partition partition = _partitionsByTopicPartition.get(topicPartition);
     partition.deleteReplica(brokerId);
@@ -1010,12 +1195,18 @@ public class ClusterModel implements Serializable {
               currentOccupiedRack.add(rackByBroker.get(node.id()));
             }
             // Add new replica to partition in rack-aware(if possible), round-robin way.
+            int attemptsWithoutAssignment = 0;
+            int maxAssignmentAttempts = racks.size() * brokersByRack.values().stream().mapToInt(List::size).max().orElse(0);
             while (newAssignedReplica.size() < replicationFactor) {
+              if (interBrokerDiskCapacityCheckEnabled() && attemptsWithoutAssignment++ >= maxAssignmentAttempts) {
+                throw new IllegalStateException("No capacity-eligible rack-aware destination for new replica " + tp);
+              }
               String rack = racks.get(rackCursor);
               if (!currentOccupiedRack.contains(rack) || currentOccupiedRack.size() == racks.size()) {
                 int cursor = cursors[rackCursor];
                 Integer brokerId = brokersByRack.get(rack).get(cursor);
-                if (!newAssignedReplica.contains(brokerId)) {
+                if (!newAssignedReplica.contains(brokerId) && canMoveReplicaToBroker(partition.leader(), broker(brokerId))) {
+                  attemptsWithoutAssignment = 0;
                   newAssignedReplica.add(brokersByRack.get(rack).get(cursor));
                   // Create a new replica in the cluster model and populate its load from the leader replica.
                   Load load = partition(tp).leader().getFollowerLoadFromLeader();

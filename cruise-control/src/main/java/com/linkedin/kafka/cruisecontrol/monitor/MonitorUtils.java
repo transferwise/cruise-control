@@ -8,6 +8,7 @@ import com.linkedin.cruisecontrol.monitor.sampling.aggregator.AggregatedMetricVa
 import com.linkedin.cruisecontrol.monitor.sampling.aggregator.MetricValues;
 import com.linkedin.cruisecontrol.monitor.sampling.aggregator.ValuesAndExtrapolations;
 import com.linkedin.kafka.cruisecontrol.common.Resource;
+import com.linkedin.kafka.cruisecontrol.common.DiskCapacityUtils;
 import com.linkedin.kafka.cruisecontrol.analyzer.goals.Goal;
 import com.linkedin.kafka.cruisecontrol.config.BrokerCapacityConfigResolver;
 import com.linkedin.kafka.cruisecontrol.config.BrokerCapacityInfo;
@@ -369,14 +370,41 @@ public final class MonitorUtils {
                                                                            Cluster cluster,
                                                                            AdminClient adminClient,
                                                                            KafkaCruiseControlConfig config) {
+    return getReplicaPlacementInfo(clusterModel, cluster, adminClient, config, false);
+  }
+
+  static Map<TopicPartition, Map<Integer, String>> getReplicaPlacementInfo(ClusterModel clusterModel,
+                                                                         Cluster cluster,
+                                                                         AdminClient adminClient,
+                                                                         KafkaCruiseControlConfig config,
+                                                                         boolean diskCapacityCheck) {
     Map<TopicPartition, Map<Integer, String>> replicaPlacementInfo = new HashMap<>();
     Map<Integer, KafkaFuture<Map<String, LogDirDescription>>> logDirsByBrokerId =
         adminClient.describeLogDirs(cluster.nodes().stream().mapToInt(Node::id).boxed().collect(Collectors.toList())).descriptions();
     for (Map.Entry<Integer, KafkaFuture<Map<String, LogDirDescription>>> entry : logDirsByBrokerId.entrySet()) {
       Integer brokerId = entry.getKey();
       try {
-        entry.getValue().get(config.getLong(LOGDIR_RESPONSE_TIMEOUT_MS_CONFIG), TimeUnit.MILLISECONDS).forEach((logdir, info) -> {
+        Map<String, LogDirDescription> descriptions = entry.getValue().get(config.getLong(LOGDIR_RESPONSE_TIMEOUT_MS_CONFIG),
+                                                                         TimeUnit.MILLISECONDS);
+        if (diskCapacityCheck && clusterModel.broker(brokerId).disks().stream().anyMatch(d -> !descriptions.containsKey(d.logDir()))) {
+          throw new IllegalStateException("Configured log directory missing from broker " + brokerId + " response.");
+        }
+        descriptions.forEach((logdir, info) -> {
+          if (diskCapacityCheck && clusterModel.broker(brokerId).disk(logdir) == null) {
+            throw new IllegalStateException("Missing configured capacity for log directory " + logdir + " on broker " + brokerId);
+          }
           if (info.error() == null) {
+            if (diskCapacityCheck) {
+              for (Map.Entry<TopicPartition, ReplicaInfo> replicaInfo : info.replicaInfos().entrySet()) {
+                double sizeInMB = DiskCapacityUtils.replicaSize(replicaInfo.getValue());
+                clusterModel.recordReplicaDiskSize(replicaInfo.getKey(), sizeInMB);
+              }
+              clusterModel.broker(brokerId).disk(logdir).setReportedUtilization(DiskCapacityUtils.utilization(info));
+              if (clusterModel.broker(brokerId).disk(logdir).isAlive()) {
+                clusterModel.broker(brokerId).disk(logdir).limitCapacity(
+                    DiskCapacityUtils.capacity(clusterModel.broker(brokerId).disk(logdir).capacity(), info));
+              }
+            }
             for (Map.Entry<TopicPartition, ReplicaInfo> e : info.replicaInfos().entrySet()) {
               if (!e.getValue().isFuture()) {
                 replicaPlacementInfo.putIfAbsent(e.getKey(), new HashMap<>());
@@ -420,6 +448,19 @@ public final class MonitorUtils {
                                     BrokerCapacityConfigResolver brokerCapacityConfigResolver,
                                     boolean allowCapacityEstimation)
       throws TimeoutException {
+    populatePartitionLoad(cluster, clusterModel, tp, valuesAndExtrapolations, replicaPlacementInfo,
+                          brokerCapacityConfigResolver, allowCapacityEstimation, false);
+  }
+
+  static void populatePartitionLoad(Cluster cluster,
+                                    ClusterModel clusterModel,
+                                    TopicPartition tp,
+                                    ValuesAndExtrapolations valuesAndExtrapolations,
+                                    Map<TopicPartition, Map<Integer, String>> replicaPlacementInfo,
+                                    BrokerCapacityConfigResolver brokerCapacityConfigResolver,
+                                    boolean allowCapacityEstimation,
+                                    boolean requirePlacement)
+      throws TimeoutException {
     PartitionInfo partitionInfo = cluster.partition(tp);
     // If partition info does not exist, the topic may have been deleted.
     if (partitionInfo != null) {
@@ -457,7 +498,17 @@ public final class MonitorUtils {
         boolean isOffline = Arrays.stream(partitionInfo.offlineReplicas())
                                   .anyMatch(offlineReplica -> offlineReplica.id() == replica.id());
 
-        String logdir = replicaPlacementInfo == null ? null : replicaPlacementInfo.get(tp).get(replica.id());
+        String logdir = replicaPlacementInfo == null ? null
+            : (requirePlacement ? replicaPlacementInfo.getOrDefault(tp, Collections.emptyMap()) : replicaPlacementInfo.get(tp)).get(replica.id());
+        if (requirePlacement && replicaPlacementInfo != null && aliveBrokers.contains(replica.id()) && !isOffline && logdir == null) {
+          if (clusterModel.broker(replica.id()).disks().stream().anyMatch(d -> !d.isAlive())) {
+            // Kafka metadata can lag the log-directory failure. Preserve this replica as offline
+            // so self-healing can move it, while the failed disk remains ineligible for incoming copies.
+            isOffline = true;
+          } else {
+            throw new TimeoutException("Missing live log-directory placement for " + tp + " on broker " + replica.id());
+          }
+        }
         // If the replica's logdir is null, it is either because replica placement information is not populated for the cluster
         // model or this replica is hosted on a dead disk and is not considered for intra-broker replica operations.
         clusterModel.createReplica(rack, replica.id(), tp, index, isLeader, isOffline, logdir, false);

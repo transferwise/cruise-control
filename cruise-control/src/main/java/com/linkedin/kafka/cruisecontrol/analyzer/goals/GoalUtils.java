@@ -217,7 +217,8 @@ public final class GoalUtils {
     switch (actionType) {
       case INTER_BROKER_REPLICA_MOVEMENT:
         return clusterModel.partition(replica.topicPartition()).canAssignReplicaToBroker(destinationBroker)
-               && destinationBroker.replica(replica.topicPartition()) == null;
+               && destinationBroker.replica(replica.topicPartition()) == null
+               && clusterModel.canMoveReplicaToBroker(replica, destinationBroker);
       case LEADERSHIP_MOVEMENT:
         return replica.isLeader() && destinationBroker.replica(replica.topicPartition()) != null;
       default:

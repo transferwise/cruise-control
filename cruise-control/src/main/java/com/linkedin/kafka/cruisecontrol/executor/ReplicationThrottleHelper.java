@@ -4,7 +4,6 @@
 
 package com.linkedin.kafka.cruisecontrol.executor;
 
-import com.linkedin.kafka.cruisecontrol.metricsreporter.CruiseControlMetricsUtils;
 import com.linkedin.kafka.cruisecontrol.model.ReplicaPlacementInfo;
 import org.apache.kafka.clients.admin.AdminClient;
 import org.apache.kafka.clients.admin.AlterConfigOp;
@@ -20,7 +19,6 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Objects;
 import java.util.Set;
 import java.util.TreeSet;
 import java.util.HashSet;
@@ -47,6 +45,7 @@ class ReplicationThrottleHelper {
   private final Long _throttleRate;
   private final int _retries;
   private final Set<Integer> _deadBrokers;
+  private final Set<ExecutionProposal> _throttledProposals = new HashSet<>();
 
   ReplicationThrottleHelper(AdminClient adminClient, Long throttleRate) {
     this(adminClient, throttleRate, RETRIES);
@@ -74,6 +73,7 @@ class ReplicationThrottleHelper {
   void setThrottles(List<ExecutionProposal> replicaMovementProposals)
   throws ExecutionException, InterruptedException, TimeoutException {
     if (throttlingEnabled()) {
+      _throttledProposals.addAll(replicaMovementProposals);
       LOG.info("Setting a rebalance throttle of {} bytes/sec", _throttleRate);
       Set<Integer> participatingBrokers = getParticipatingBrokers(replicaMovementProposals);
       Map<String, Set<String>> throttledReplicas = getThrottledReplicasByTopic(replicaMovementProposals);
@@ -145,6 +145,43 @@ class ReplicationThrottleHelper {
         removeThrottledReplicasFromTopic(entry.getKey(), entry.getValue());
       }
     }
+  }
+
+  /** Retry cleanup for every proposal touched by this execution, including partially installed throttles. */
+  void clearAllThrottles() throws ExecutionException, InterruptedException, TimeoutException {
+    if (!throttlingEnabled() || _throttledProposals.isEmpty()) {
+      return;
+    }
+    List<ExecutionProposal> proposals = new java.util.ArrayList<>(_throttledProposals);
+    Exception firstFailure = null;
+    for (int broker : getParticipatingBrokers(proposals)) {
+      try {
+        removeThrottledRateFromBroker(broker);
+      } catch (ExecutionException | InterruptedException | TimeoutException | IllegalStateException e) {
+        if (firstFailure == null) {
+          firstFailure = e;
+        }
+      }
+    }
+    for (Map.Entry<String, Set<String>> entry : getThrottledReplicasByTopic(proposals).entrySet()) {
+      try {
+        removeThrottledReplicasFromTopic(entry.getKey(), entry.getValue());
+      } catch (ExecutionException | InterruptedException | TimeoutException | IllegalStateException e) {
+        if (firstFailure == null) {
+          firstFailure = e;
+        }
+      }
+    }
+    if (firstFailure instanceof ExecutionException) {
+      throw (ExecutionException) firstFailure;
+    } else if (firstFailure instanceof InterruptedException) {
+      throw (InterruptedException) firstFailure;
+    } else if (firstFailure instanceof TimeoutException) {
+      throw (TimeoutException) firstFailure;
+    } else if (firstFailure != null) {
+      throw (IllegalStateException) firstFailure;
+    }
+    _throttledProposals.clear();
   }
 
   private boolean throttlingEnabled() {
@@ -359,34 +396,11 @@ class ReplicationThrottleHelper {
 
   // Retries until we can read the configs changes we just wrote
   void waitForConfigs(ConfigResource cf, Collection<AlterConfigOp> ops) {
-    // Use HashMap::new instead of Collectors.toMap to allow inserting null values
-    Map<String, String> expectedConfigs = ops.stream()
-            .collect(HashMap::new, (m, o) -> m.put(o.configEntry().name(), o.configEntry().value()), HashMap::putAll);
-    boolean retryResponse = CruiseControlMetricsUtils.retry(() -> {
-      try {
-        return !configsEqual(getEntityConfigs(cf), expectedConfigs);
-      } catch (ExecutionException | InterruptedException | TimeoutException e) {
-        return false;
-      }
-    }, _retries);
-    if (!retryResponse) {
-      throw new IllegalStateException("The following configs " + ops + " were not applied to " + cf + " within the time limit");
-    }
+    ThrottleConfigUtils.waitForConfigs(_adminClient, Collections.singletonMap(cf, ops), _retries, CLIENT_REQUEST_TIMEOUT_MS,
+                                      (current, expected) -> ThrottleConfigUtils.configsEqual(current, expected, cf.type()), false);
   }
 
   static boolean configsEqual(Config configs, Map<String, String> expectedValues) {
-    for (Map.Entry<String, String> entry : expectedValues.entrySet()) {
-      ConfigEntry configEntry = configs.get(entry.getKey());
-      if (configEntry == null || configEntry.value() == null || configEntry.value().isEmpty()) {
-        if (entry.getValue() != null) {
-          return false;
-        }
-      } else if (configEntry.source().equals(ConfigEntry.ConfigSource.STATIC_BROKER_CONFIG) && entry.getValue() == null) {
-        LOG.debug("Found static broker config: {}, skipping comparison", configEntry);
-      } else if (!Objects.equals(entry.getValue(), configEntry.value())) {
-        return false;
-      }
-    }
-    return true;
+    return ThrottleConfigUtils.configsEqual(configs, expectedValues, ConfigResource.Type.BROKER);
   }
 }

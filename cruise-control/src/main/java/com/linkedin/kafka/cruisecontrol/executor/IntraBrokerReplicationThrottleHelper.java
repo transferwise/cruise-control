@@ -4,7 +4,6 @@
 
 package com.linkedin.kafka.cruisecontrol.executor;
 
-import com.linkedin.kafka.cruisecontrol.metricsreporter.CruiseControlMetricsUtils;
 import org.apache.kafka.clients.admin.AdminClient;
 import org.apache.kafka.clients.admin.AlterConfigOp;
 import org.apache.kafka.clients.admin.Config;
@@ -12,14 +11,12 @@ import org.apache.kafka.clients.admin.ConfigEntry;
 import org.apache.kafka.common.config.ConfigResource;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Objects;
 import java.util.Set;
 import java.util.TreeSet;
 import java.util.concurrent.ExecutionException;
@@ -63,9 +60,7 @@ class IntraBrokerReplicationThrottleHelper {
     if (throttlingEnabled()) {
       LOG.info("Setting an intra-broker rebalance throttle of {} bytes/sec", _throttleRate);
       Set<Integer> participatingBrokers = getParticipatingBrokers(tasksToExecute);
-      for (int broker : participatingBrokers) {
-        setThrottledRateIfNecessary(broker);
-      }
+      changeThrottles(participatingBrokers, true);
     }
   }
 
@@ -86,9 +81,7 @@ class IntraBrokerReplicationThrottleHelper {
       brokersToRemoveThrottlesFrom.removeAll(brokersWithInProgressTasks);
 
       LOG.info("Removing intra-broker replica movement throttles from brokers: {}", brokersToRemoveThrottlesFrom);
-      for (int broker : brokersToRemoveThrottlesFrom) {
-        removeThrottledRateFromBroker(broker);
-      }
+      changeThrottles(brokersToRemoveThrottlesFrom, false);
     }
   }
 
@@ -100,32 +93,7 @@ class IntraBrokerReplicationThrottleHelper {
   void clearAllThrottles() throws ExecutionException, InterruptedException, TimeoutException {
     if (throttlingEnabled() && !_throttledBrokers.isEmpty()) {
       LOG.info("Final cleanup: removing intra-broker throttles from all participating brokers: {}", _throttledBrokers);
-      List<Integer> failedBrokers = new ArrayList<>();
-      Exception firstException = null;
-      for (int broker : _throttledBrokers) {
-        try {
-          removeThrottledRateFromBroker(broker);
-        } catch (ExecutionException | InterruptedException | TimeoutException | IllegalStateException e) {
-          LOG.warn("Failed to remove intra-broker throttle from broker {}", broker, e);
-          failedBrokers.add(broker);
-          if (firstException == null) {
-            firstException = e;
-          }
-        }
-      }
-      _throttledBrokers.clear();
-      if (firstException != null) {
-        LOG.error("Failed to remove intra-broker throttles from brokers: {}", failedBrokers);
-        if (firstException instanceof ExecutionException) {
-          throw (ExecutionException) firstException;
-        } else if (firstException instanceof InterruptedException) {
-          throw (InterruptedException) firstException;
-        } else if (firstException instanceof TimeoutException) {
-          throw (TimeoutException) firstException;
-        } else {
-          throw (IllegalStateException) firstException;
-        }
-      }
+      changeThrottles(new TreeSet<>(_throttledBrokers), false);
     }
   }
 
@@ -152,128 +120,125 @@ class IntraBrokerReplicationThrottleHelper {
     return participatingBrokers;
   }
 
-  private void setThrottledRateIfNecessary(int brokerId) throws ExecutionException, InterruptedException, TimeoutException {
-    if (_throttleRate == null) {
-      throw new IllegalStateException("Throttle rate cannot be null");
-    }
-    Config brokerConfigs = getBrokerConfigs(brokerId);
-    ConfigEntry currThrottleRate = brokerConfigs.get(REPLICA_ALTER_LOG_DIRS_IO_MAX_BYTES_PER_SECOND_CONFIG);
-    // Record the original value only the first time we touch this broker.
-    // Add to _throttledBrokers immediately after recording, so that if changeBrokerConfigs succeeds
-    // but waitForConfigs throws, the broker is still tracked for cleanup.
-    if (!_originalThrottleValues.containsKey(brokerId)) {
-      if (currThrottleRate != null
-          && currThrottleRate.source() == ConfigEntry.ConfigSource.DYNAMIC_BROKER_CONFIG) {
-        _originalThrottleValues.put(brokerId, currThrottleRate.value());
-        LOG.debug("Recorded pre-existing dynamic broker throttle for broker {}: {}", brokerId, currThrottleRate.value());
-      } else {
-        _originalThrottleValues.put(brokerId, null);
-      }
-      _throttledBrokers.add(brokerId);
-    }
-    if (currThrottleRate == null || !currThrottleRate.value().equals(String.valueOf(_throttleRate))) {
-      LOG.debug("Setting {} to {} bytes/second for broker {}", REPLICA_ALTER_LOG_DIRS_IO_MAX_BYTES_PER_SECOND_CONFIG,
-          _throttleRate, brokerId);
-      List<AlterConfigOp> ops = Collections.singletonList(
-          new AlterConfigOp(new ConfigEntry(REPLICA_ALTER_LOG_DIRS_IO_MAX_BYTES_PER_SECOND_CONFIG,
-              String.valueOf(_throttleRate)), AlterConfigOp.OpType.SET));
-      changeBrokerConfigs(brokerId, ops);
-    }
-  }
-
-  private void removeThrottledRateFromBroker(int brokerId)
+  private void changeThrottles(Set<Integer> brokers, boolean setting)
       throws ExecutionException, InterruptedException, TimeoutException {
-    Config brokerConfigs = getBrokerConfigs(brokerId);
-    ConfigEntry currThrottle = brokerConfigs.get(REPLICA_ALTER_LOG_DIRS_IO_MAX_BYTES_PER_SECOND_CONFIG);
-    if (currThrottle == null || currThrottle.value() == null || currThrottle.value().isEmpty()) {
-      // Config is not currently visible. If this broker is tracked (we previously wrote a SET that was
-      // accepted), issue restore/delete anyway to compensate in case the write becomes visible later.
-      if (_originalThrottleValues.containsKey(brokerId)) {
-        String originalValue = _originalThrottleValues.get(brokerId);
-        if (originalValue != null) {
-          LOG.debug("Config not visible on broker {} but was previously set. Restoring original value: {}", brokerId, originalValue);
-          List<AlterConfigOp> ops = Collections.singletonList(
-              new AlterConfigOp(new ConfigEntry(REPLICA_ALTER_LOG_DIRS_IO_MAX_BYTES_PER_SECOND_CONFIG, originalValue),
-                  AlterConfigOp.OpType.SET));
-          changeBrokerConfigs(brokerId, ops);
-        } else {
-          LOG.debug("Config not visible on broker {} but was previously set. Issuing DELETE to compensate.", brokerId);
-          List<AlterConfigOp> ops = Collections.singletonList(
-              new AlterConfigOp(new ConfigEntry(REPLICA_ALTER_LOG_DIRS_IO_MAX_BYTES_PER_SECOND_CONFIG, null),
-                  AlterConfigOp.OpType.DELETE));
-          changeBrokerConfigs(brokerId, ops);
+    if (setting && _throttleRate == null) {
+      throw new IllegalStateException("Throttle rate cannot be null when setting throttles.");
+    }
+    if (brokers.isEmpty()) {
+      return;
+    }
+    List<ConfigResource> resources = brokers.stream().map(b -> new ConfigResource(ConfigResource.Type.BROKER, b.toString()))
+        .collect(Collectors.toList());
+    Map<ConfigResource, org.apache.kafka.common.KafkaFuture<Config>> futures = _adminClient.describeConfigs(resources).values();
+    Map<ConfigResource, Collection<AlterConfigOp>> changes = new HashMap<>();
+    Exception firstFailure = null;
+    Set<Integer> retrievedBrokers = new HashSet<>();
+    for (ConfigResource resource : resources) {
+      try {
+        if (!futures.containsKey(resource)) {
+          throw new IllegalStateException("Missing throttle config response for " + resource);
+        }
+        Config config = futures.get(resource).get(CLIENT_REQUEST_TIMEOUT_MS, TimeUnit.MILLISECONDS);
+        int broker = Integer.parseInt(resource.name());
+        retrievedBrokers.add(broker);
+        ConfigEntry current = config.get(REPLICA_ALTER_LOG_DIRS_IO_MAX_BYTES_PER_SECOND_CONFIG);
+        if (setting) {
+          if (!_originalThrottleValues.containsKey(broker)) {
+            _originalThrottleValues.put(broker, current != null && current.source() == ConfigEntry.ConfigSource.DYNAMIC_BROKER_CONFIG
+                ? current.value() : null);
+          }
+          // Track before issuing SET so cleanup can compensate for failures after the write is accepted.
+          _throttledBrokers.add(broker);
+          if (current == null || !String.valueOf(_throttleRate).equals(current.value())) {
+            changes.put(resource, throttleOperation(String.valueOf(_throttleRate)));
+          }
+        } else if (current == null || current.value() == null || current.value().isEmpty()) {
+          if (_originalThrottleValues.containsKey(broker)) {
+            changes.put(resource, throttleOperation(_originalThrottleValues.get(broker)));
+          }
+        } else if (_originalThrottleValues.containsKey(broker) && current.source() != ConfigEntry.ConfigSource.STATIC_BROKER_CONFIG) {
+          changes.put(resource, throttleOperation(_originalThrottleValues.get(broker)));
+        }
+      } catch (ExecutionException | InterruptedException | TimeoutException | IllegalStateException e) {
+        LOG.warn("Failed to read intra-broker throttle config for {}", resource, e);
+        if (firstFailure == null) {
+          firstFailure = e;
         }
       }
-      return;
     }
-    if (currThrottle.source() == ConfigEntry.ConfigSource.STATIC_BROKER_CONFIG) {
-      LOG.debug("Skipping removal for static intra-broker throttle rate: {} on broker {}", currThrottle, brokerId);
-      return;
+    // Remove only brokers whose requested mutation and propagation were confirmed.
+    Map<ConfigResource, Exception> mutationFailures = changeBrokerConfigs(changes);
+    if (!setting) {
+      mutationFailures.keySet().forEach(r -> retrievedBrokers.remove(Integer.parseInt(r.name())));
+      _throttledBrokers.removeAll(retrievedBrokers);
     }
-    String originalValue = _originalThrottleValues.get(brokerId);
-    if (originalValue != null) {
-      // Restore the pre-existing operator-configured throttle value
-      LOG.debug("Restoring pre-existing intra-broker throttle rate {} on broker {}", originalValue, brokerId);
-      List<AlterConfigOp> ops = Collections.singletonList(
-          new AlterConfigOp(new ConfigEntry(REPLICA_ALTER_LOG_DIRS_IO_MAX_BYTES_PER_SECOND_CONFIG, originalValue),
-              AlterConfigOp.OpType.SET));
-      changeBrokerConfigs(brokerId, ops);
-    } else {
-      LOG.debug("Removing intra-broker throttle rate: {} on broker {}", currThrottle, brokerId);
-      List<AlterConfigOp> ops = Collections.singletonList(
-          new AlterConfigOp(new ConfigEntry(REPLICA_ALTER_LOG_DIRS_IO_MAX_BYTES_PER_SECOND_CONFIG, null),
-              AlterConfigOp.OpType.DELETE));
-      changeBrokerConfigs(brokerId, ops);
+    for (Map.Entry<ConfigResource, Exception> failure : mutationFailures.entrySet()) {
+      LOG.warn("Failed to apply intra-broker throttle config for {}", failure.getKey(), failure.getValue());
+      if (firstFailure == null) {
+        firstFailure = failure.getValue();
+      }
+    }
+    if (firstFailure instanceof ExecutionException) {
+      throw (ExecutionException) firstFailure;
+    } else if (firstFailure instanceof InterruptedException) {
+      throw (InterruptedException) firstFailure;
+    } else if (firstFailure instanceof TimeoutException) {
+      throw (TimeoutException) firstFailure;
+    } else if (firstFailure != null) {
+      throw (IllegalStateException) firstFailure;
     }
   }
 
-  private Config getBrokerConfigs(int brokerId) throws ExecutionException, InterruptedException, TimeoutException {
-    ConfigResource cf = new ConfigResource(ConfigResource.Type.BROKER, String.valueOf(brokerId));
-    Map<ConfigResource, Config> configs = _adminClient.describeConfigs(Collections.singletonList(cf)).all()
-        .get(CLIENT_REQUEST_TIMEOUT_MS, TimeUnit.MILLISECONDS);
-    return configs.get(cf);
+  private Collection<AlterConfigOp> throttleOperation(String value) {
+    return Collections.singletonList(new AlterConfigOp(new ConfigEntry(REPLICA_ALTER_LOG_DIRS_IO_MAX_BYTES_PER_SECOND_CONFIG, value),
+                                                        value == null ? AlterConfigOp.OpType.DELETE : AlterConfigOp.OpType.SET));
+  }
+
+  private Map<ConfigResource, Exception> changeBrokerConfigs(Map<ConfigResource, Collection<AlterConfigOp>> changes) {
+    Map<ConfigResource, Exception> failures = new HashMap<>();
+    Map<ConfigResource, Collection<AlterConfigOp>> accepted = new HashMap<>();
+    if (!changes.isEmpty()) {
+      Map<ConfigResource, org.apache.kafka.common.KafkaFuture<Void>> results = _adminClient.incrementalAlterConfigs(changes).values();
+      for (Map.Entry<ConfigResource, Collection<AlterConfigOp>> change : changes.entrySet()) {
+        try {
+          if (!results.containsKey(change.getKey())) {
+            throw new IllegalStateException("Missing throttle mutation response for " + change.getKey());
+          }
+          results.get(change.getKey()).get(CLIENT_REQUEST_TIMEOUT_MS, TimeUnit.MILLISECONDS);
+          accepted.put(change.getKey(), change.getValue());
+        } catch (ExecutionException | InterruptedException | TimeoutException | IllegalStateException e) {
+          failures.put(change.getKey(), e);
+        }
+      }
+      failures.putAll(ThrottleConfigUtils.waitForConfigsPerResource(_adminClient, accepted, _retries, CLIENT_REQUEST_TIMEOUT_MS));
+    }
+    return failures;
   }
 
   void changeBrokerConfigs(int brokerId, Collection<AlterConfigOp> ops)
       throws ExecutionException, InterruptedException, TimeoutException {
-    ConfigResource cf = new ConfigResource(ConfigResource.Type.BROKER, String.valueOf(brokerId));
-    Map<ConfigResource, Collection<AlterConfigOp>> configs = Collections.singletonMap(cf, ops);
-    _adminClient.incrementalAlterConfigs(configs).all()
-        .get(CLIENT_REQUEST_TIMEOUT_MS, TimeUnit.MILLISECONDS);
-    waitForConfigs(cf, ops);
+    Map<ConfigResource, Exception> failures =
+        changeBrokerConfigs(Collections.singletonMap(new ConfigResource(ConfigResource.Type.BROKER, String.valueOf(brokerId)), ops));
+    if (!failures.isEmpty()) {
+      Exception failure = failures.values().iterator().next();
+      if (failure instanceof ExecutionException) {
+        throw (ExecutionException) failure;
+      } else if (failure instanceof InterruptedException) {
+        throw (InterruptedException) failure;
+      } else if (failure instanceof TimeoutException) {
+        throw (TimeoutException) failure;
+      }
+      throw (IllegalStateException) failure;
+    }
   }
 
   void waitForConfigs(ConfigResource cf, Collection<AlterConfigOp> ops) {
-    Map<String, String> expectedConfigs = ops.stream()
-        .collect(HashMap::new, (m, o) -> m.put(o.configEntry().name(), o.configEntry().value()), HashMap::putAll);
-    boolean retryResponse = CruiseControlMetricsUtils.retry(() -> {
-      try {
-        Config currentConfigs = _adminClient.describeConfigs(Collections.singletonList(cf)).all()
-            .get(CLIENT_REQUEST_TIMEOUT_MS, TimeUnit.MILLISECONDS).get(cf);
-        return !configsEqual(currentConfigs, expectedConfigs);
-      } catch (ExecutionException | InterruptedException | TimeoutException e) {
-        LOG.warn("Failed to verify config propagation for {}, will retry", cf, e);
-        return true;
-      }
-    }, _retries);
-    if (!retryResponse) {
-      throw new IllegalStateException("The following configs " + ops + " were not applied to " + cf + " within the time limit");
-    }
+    ThrottleConfigUtils.waitForConfigs(_adminClient, Collections.singletonMap(cf, ops), _retries, CLIENT_REQUEST_TIMEOUT_MS,
+                                      IntraBrokerReplicationThrottleHelper::configsEqual, true);
   }
 
   static boolean configsEqual(Config configs, Map<String, String> expectedValues) {
-    for (Map.Entry<String, String> entry : expectedValues.entrySet()) {
-      ConfigEntry configEntry = configs.get(entry.getKey());
-      if (configEntry == null || configEntry.value() == null || configEntry.value().isEmpty()) {
-        if (entry.getValue() != null) {
-          return false;
-        }
-      } else if (entry.getValue() == null && configEntry.source() != ConfigEntry.ConfigSource.DYNAMIC_BROKER_CONFIG) {
-        LOG.debug("Config {} has non-broker-specific source {}, treating DELETE as successful", entry.getKey(), configEntry.source());
-      } else if (!Objects.equals(entry.getValue(), configEntry.value())) {
-        return false;
-      }
-    }
-    return true;
+    return ThrottleConfigUtils.configsEqual(configs, expectedValues, ConfigResource.Type.BROKER);
   }
 }

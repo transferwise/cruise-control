@@ -14,6 +14,7 @@ import com.linkedin.kafka.cruisecontrol.model.RawAndDerivedResource;
 import com.linkedin.kafka.cruisecontrol.model.Replica;
 import com.linkedin.kafka.cruisecontrol.model.ReplicaPlacementInfo;
 import java.util.HashSet;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -87,7 +88,16 @@ public final class AnalyzerUtils {
         finalReplicas.set(0, finalLeaderPlacementInfo);
       }
       double partitionSize = optimizedClusterModel.partition(tp).leader().load().expectedUtilizationFor(Resource.DISK);
-      diff.add(new ExecutionProposal(tp, (int) partitionSize, initialLeaderDistribution.get(tp), initialReplicas, finalReplicas));
+      Map<Integer, Double> destinationDiskCapacities = new HashMap<>();
+      if (optimizedClusterModel.interBrokerDiskCapacityCheckEnabled()) {
+        partitionSize = Math.ceil(optimizedClusterModel.replicaDiskSize(finalLeader));
+        finalReplicas.stream().filter(r -> !initialReplicas.contains(r)).forEach(r ->
+            destinationDiskCapacities.put(r.brokerId(), optimizedClusterModel.broker(r.brokerId()).disk(r.logdir()).capacity()));
+      } else {
+        partitionSize = (int) partitionSize;
+      }
+      diff.add(new ExecutionProposal(tp, (long) partitionSize, initialLeaderDistribution.get(tp), initialReplicas, finalReplicas,
+                                     destinationDiskCapacities));
     }
     return diff;
   }

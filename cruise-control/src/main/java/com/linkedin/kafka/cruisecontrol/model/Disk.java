@@ -40,6 +40,7 @@ public class Disk implements Comparable<Disk> {
   private final Broker _broker;
   // Utilization is only relevant for alive disk.
   private double _utilization;
+  private double _reportedUtilization = Double.NaN;
   // A map of cached sorted replicas using different user defined score functions.
   private final Map<String, SortedReplicas> _sortedReplicas;
 
@@ -96,6 +97,32 @@ public class Disk implements Comparable<Disk> {
 
   public double utilization() {
     return _utilization;
+  }
+
+  /**
+   * Set total Kafka log-directory usage, including replicas without sampled metrics and future replicas.
+   * @param utilization total usage in MB
+   */
+  public void setReportedUtilization(double utilization) {
+    if (!Double.isFinite(utilization) || utilization < 0) {
+      throw new IllegalArgumentException("Invalid reported disk utilization: " + utilization);
+    }
+    _reportedUtilization = utilization;
+  }
+
+  public double reportedUtilization() {
+    return _reportedUtilization;
+  }
+
+  /**
+   * Limit the configured capacity to the live filesystem capacity.
+   * @param capacity maximum capacity in MB
+   */
+  public void limitCapacity(double capacity) {
+    if (!Double.isFinite(capacity) || capacity < 0) {
+      throw new IllegalArgumentException("Invalid disk capacity: " + capacity);
+    }
+    _capacity = Math.min(_capacity, capacity);
   }
 
   /**

@@ -91,15 +91,8 @@ public class AddBrokersRunnable extends GoalBasedOperationRunnable {
     _replicationThrottle = parameters.replicationThrottle();
     // AddBrokers endpoint does not expose intra_broker_replication_throttle as a request parameter,
     // so resolve from config with the per-request replication_throttle as fallback.
-    KafkaCruiseControlConfig userReqConfig = kafkaCruiseControl.config();
-    Long intraBrokerThrottle = userReqConfig.getLong(ExecutorConfig.DEFAULT_INTRA_BROKER_REPLICATION_THROTTLE_CONFIG);
-    if (intraBrokerThrottle == null) {
-      intraBrokerThrottle = _replicationThrottle;
-    }
-    if (intraBrokerThrottle == null) {
-      intraBrokerThrottle = userReqConfig.getLong(ExecutorConfig.DEFAULT_REPLICATION_THROTTLE_CONFIG);
-    }
-    _intraBrokerReplicationThrottle = intraBrokerThrottle;
+    _intraBrokerReplicationThrottle = ParameterUtils.resolveIntraBrokerReplicationThrottle(kafkaCruiseControl.config(),
+                                                                                        _replicationThrottle);
   }
 
   @Override

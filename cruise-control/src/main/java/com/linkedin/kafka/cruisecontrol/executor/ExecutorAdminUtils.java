@@ -31,6 +31,13 @@ import static org.apache.kafka.clients.admin.DescribeReplicaLogDirsResult.Replic
 public final class ExecutorAdminUtils {
   private static final Logger LOG = LoggerFactory.getLogger(ExecutorAdminUtils.class);
 
+  /** A pre-submission rejection: none of the requested disk copies have been submitted. */
+  static final class DiskCapacityValidationException extends IllegalStateException {
+    DiskCapacityValidationException(RuntimeException cause) {
+      super("Intra-broker disk capacity validation failed before submission.", cause);
+    }
+  }
+
   private ExecutorAdminUtils() {
 
   }
@@ -115,6 +122,29 @@ public final class ExecutorAdminUtils {
                                                  AdminClient adminClient,
                                                  ExecutionTaskManager executionTaskManager,
                                                  KafkaCruiseControlConfig config) {
+    executeIntraBrokerReplicaMovements(tasksToExecute, tasksToExecute, adminClient, executionTaskManager, config);
+  }
+
+  /**
+   * Validate destination capacity for new and active copies before submitting disk moves.
+   * @param tasksToExecute tasks to submit
+   * @param activeTasks all active replica copy tasks
+   * @param adminClient Kafka admin client
+   * @param executionTaskManager task state manager
+   * @param config operator configuration
+   */
+  static void executeIntraBrokerReplicaMovements(List<ExecutionTask> tasksToExecute,
+                                                 Collection<ExecutionTask> activeTasks,
+                                                 AdminClient adminClient,
+                                                 ExecutionTaskManager executionTaskManager,
+                                                 KafkaCruiseControlConfig config) {
+    try {
+      InterBrokerDiskCapacityValidator.validateIntraBroker(adminClient, tasksToExecute, activeTasks,
+          config.getDouble(com.linkedin.kafka.cruisecontrol.config.constants.AnalyzerConfig.DISK_CAPACITY_THRESHOLD_CONFIG),
+          config.getLong(LOGDIR_RESPONSE_TIMEOUT_MS_CONFIG));
+    } catch (RuntimeException e) {
+      throw new DiskCapacityValidationException(e);
+    }
     Map<TopicPartitionReplica, String> replicaAssignment = new HashMap<>();
     Map<TopicPartitionReplica, ExecutionTask> replicaToTask = new HashMap<>();
     tasksToExecute.forEach(t -> {

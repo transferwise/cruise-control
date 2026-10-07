@@ -14,6 +14,7 @@ import com.linkedin.kafka.cruisecontrol.exception.KafkaCruiseControlException;
 import com.linkedin.kafka.cruisecontrol.executor.strategy.ReplicaMovementStrategy;
 import com.linkedin.kafka.cruisecontrol.model.ClusterModel;
 import com.linkedin.kafka.cruisecontrol.model.ReplicaPlacementInfo;
+import com.linkedin.kafka.cruisecontrol.servlet.parameters.ParameterUtils;
 import com.linkedin.kafka.cruisecontrol.servlet.parameters.TopicConfigurationParameters;
 import com.linkedin.kafka.cruisecontrol.servlet.parameters.TopicReplicationFactorChangeParameters;
 import com.linkedin.kafka.cruisecontrol.servlet.response.OptimizationResult;
@@ -209,7 +210,9 @@ public class UpdateTopicConfigurationRunnable extends GoalBasedOperationRunnable
       _kafkaCruiseControl.executeProposals(result.goalProposals(), Collections.emptySet(), false, _concurrentInterBrokerPartitionMovements,
           _maxInterBrokerPartitionMovements,
           0, _clusterLeaderMovementConcurrency, _brokerLeaderMovementConcurrency,
-          _executionProgressCheckIntervalMs, _replicaMovementStrategy, _replicationThrottle, null, _isTriggeredByUserRequest, _uuid,
+          _executionProgressCheckIntervalMs, _replicaMovementStrategy, _replicationThrottle,
+          ParameterUtils.resolveIntraBrokerReplicationThrottle(
+              _kafkaCruiseControl.config(), _replicationThrottle), _isTriggeredByUserRequest, _uuid,
           SKIP_AUTO_REFRESHING_CONCURRENCY);
     }
     return result;

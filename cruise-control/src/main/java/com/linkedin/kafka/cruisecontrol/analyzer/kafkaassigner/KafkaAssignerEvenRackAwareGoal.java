@@ -204,6 +204,9 @@ public class KafkaAssignerEvenRackAwareGoal implements Goal {
       Replica replicaAtPosition = partition.replicas().get(replicaPosition);
 
       if (destinationReplica == null) {
+        if (!clusterModel.canMoveReplicaToBroker(replicaAtPosition, destinationBroker)) {
+          continue;
+        }
         // The destination broker has no replica from the source partition: move the source replica to the destination broker.
         LOG.trace("Destination broker {} has no other replica from the same partition, move the replica {} to there.",
                   destinationBroker, replicaAtPosition);

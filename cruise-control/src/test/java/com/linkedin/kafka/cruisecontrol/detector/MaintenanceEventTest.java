@@ -563,7 +563,7 @@ public class MaintenanceEventTest {
     for (MaintenanceEventType eventType : MaintenanceEventType.cachedValues()) {
       parameterConfigOverrides.put(MAINTENANCE_EVENT_TYPE_CONFIG, eventType);
       // Expect mocks.
-      EasyMock.expect(_mockKafkaCruiseControl.config()).andReturn(_config).anyTimes();
+      EasyMock.expect(_mockKafkaCruiseControl.config()).andReturn(_config).times(6);
       EasyMock.replay(_mockKafkaCruiseControl);
       for (int i = 1; i <= 3; i++) {
         parameterConfigOverrides.put(ANOMALY_DETECTION_TIME_MS_OBJECT_CONFIG, MOCK_TIME_MS * i);

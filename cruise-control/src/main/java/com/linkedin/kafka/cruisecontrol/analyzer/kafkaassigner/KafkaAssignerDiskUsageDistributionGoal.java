@@ -487,7 +487,7 @@ public class KafkaAssignerDiskUsageDistributionGoal implements Goal {
     boolean case2 = Objects.equals(mappedRackIdOf(replica.broker()), mappedRackIdOf(destinationBroker))
                     && destinationBroker.replica(tp) == null;
 
-    return case1 || case2;
+    return (case1 || case2) && clusterModel.canMoveReplicaToBroker(replica, destinationBroker);
   }
 
   /**
@@ -514,7 +514,9 @@ public class KafkaAssignerDiskUsageDistributionGoal implements Goal {
                        .noneMatch(mappedRackIdOfR1::equals);
 
     boolean sameRole = r1.isLeader() == r2.isLeader();
-    return (inSameRack || rackAware) && sameRole;
+    return (inSameRack || rackAware) && sameRole
+           && clusterModel.canMoveReplicaToBroker(r1, r2.broker())
+           && clusterModel.canMoveReplicaToBroker(r2, r1.broker());
   }
 
   private NavigableSet<ReplicaWrapper> sortReplicasAscend(BrokerAndSortedReplicas bas, Set<String> excludedTopics) {

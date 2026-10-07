@@ -532,6 +532,9 @@ public class LoadMonitor {
       throws NotEnoughValidWindowsException, TimeoutException, BrokerCapacityResolutionException {
     long startMs = _time.milliseconds();
 
+    boolean diskAwareInterBroker = _config.getBoolean(AnalyzerConfig.INTER_BROKER_DISK_CAPACITY_CHECK_ENABLED_CONFIG);
+    boolean populateDiskInfo = populateReplicaPlacementInfo || diskAwareInterBroker;
+
     MetadataClient.ClusterAndGeneration clusterAndGeneration = refreshClusterAndGeneration();
     Cluster cluster = clusterAndGeneration.cluster();
 
@@ -550,23 +553,28 @@ public class LoadMonitor {
 
     final Timer.Context ctx = _clusterModelCreationTimer.time();
     try {
-      populateClusterCapacity(populateReplicaPlacementInfo, allowCapacityEstimation, clusterModel, cluster);
+      populateClusterCapacity(populateDiskInfo, allowCapacityEstimation, clusterModel, cluster);
 
       // Populate replica placement information for the cluster model if requested.
       Map<TopicPartition, Map<Integer, String>> replicaPlacementInfo = null;
-      if (populateReplicaPlacementInfo) {
-        replicaPlacementInfo = getReplicaPlacementInfo(clusterModel, cluster, _adminClient, _config);
+      if (populateDiskInfo) {
+        replicaPlacementInfo = getReplicaPlacementInfo(clusterModel, cluster, _adminClient, _config, diskAwareInterBroker);
       }
 
       // Populate snapshots for the cluster model.
       for (Map.Entry<PartitionEntity, ValuesAndExtrapolations> entry : partitionValuesAndExtrapolations.entrySet()) {
         TopicPartition tp = entry.getKey().tp();
         ValuesAndExtrapolations leaderLoad = entry.getValue();
-        populatePartitionLoad(cluster, clusterModel, tp, leaderLoad, replicaPlacementInfo, _brokerCapacityConfigResolver, allowCapacityEstimation);
+        populatePartitionLoad(cluster, clusterModel, tp, leaderLoad, replicaPlacementInfo, _brokerCapacityConfigResolver,
+                              allowCapacityEstimation, diskAwareInterBroker);
         step.incrementPopulatedNumPartitions();
       }
       // Set the state of bad brokers in clusterModel based on the Kafka cluster state.
       setBadBrokerState(clusterModel, cluster);
+
+      if (diskAwareInterBroker) {
+        clusterModel.enableInterBrokerDiskCapacityCheck(_config.getDouble(AnalyzerConfig.DISK_CAPACITY_THRESHOLD_CONFIG));
+      }
 
       if (LOG.isDebugEnabled()) {
         LOG.debug("Generated cluster model in {} ms", _time.milliseconds() - startMs);

@@ -9,7 +9,6 @@ import com.linkedin.kafka.cruisecontrol.KafkaCruiseControl;
 import com.linkedin.kafka.cruisecontrol.analyzer.OptimizationOptions;
 import com.linkedin.kafka.cruisecontrol.analyzer.OptimizerResult;
 import com.linkedin.kafka.cruisecontrol.config.KafkaCruiseControlConfig;
-import com.linkedin.kafka.cruisecontrol.config.constants.ExecutorConfig;
 import com.linkedin.kafka.cruisecontrol.exception.KafkaCruiseControlException;
 import com.linkedin.kafka.cruisecontrol.executor.strategy.ReplicaMovementStrategy;
 import com.linkedin.kafka.cruisecontrol.model.ClusterModel;
@@ -78,15 +77,8 @@ public class FixOfflineReplicasRunnable extends GoalBasedOperationRunnable {
     _replicationThrottle = parameters.replicationThrottle();
     // FixOfflineReplicas endpoint does not expose intra_broker_replication_throttle as a request parameter,
     // so resolve from config with the per-request replication_throttle as fallback.
-    KafkaCruiseControlConfig userReqConfig = kafkaCruiseControl.config();
-    Long intraBrokerThrottle = userReqConfig.getLong(ExecutorConfig.DEFAULT_INTRA_BROKER_REPLICATION_THROTTLE_CONFIG);
-    if (intraBrokerThrottle == null) {
-      intraBrokerThrottle = _replicationThrottle;
-    }
-    if (intraBrokerThrottle == null) {
-      intraBrokerThrottle = userReqConfig.getLong(DEFAULT_REPLICATION_THROTTLE_CONFIG);
-    }
-    _intraBrokerReplicationThrottle = intraBrokerThrottle;
+    _intraBrokerReplicationThrottle = ParameterUtils.resolveIntraBrokerReplicationThrottle(kafkaCruiseControl.config(),
+                                                                                        _replicationThrottle);
   }
 
   @Override

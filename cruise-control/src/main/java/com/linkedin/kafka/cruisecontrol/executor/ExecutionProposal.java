@@ -32,6 +32,8 @@ public class ExecutionProposal {
   private static final String OLD_REPLICAS = "oldReplicas";
   @JsonResponseField
   private static final String NEW_REPLICAS = "newReplicas";
+  @JsonResponseField(required = false)
+  private static final String DESTINATION_LOG_DIRS = "destinationLogDirs";
 
   private final TopicPartition _tp;
   private final long _partitionSize;
@@ -44,6 +46,7 @@ public class ExecutionProposal {
   private final Set<ReplicaPlacementInfo> _replicasToRemove;
   // Replicas to move between disks are the replicas which are to be hosted by a different disk of the same broker.
   private final Map<Integer, ReplicaPlacementInfo> _replicasToMoveBetweenDisksByBroker;
+  private final Map<Integer, Double> _destinationDiskCapacityByBroker;
 
   /**
    * Construct an execution proposals.
@@ -60,12 +63,23 @@ public class ExecutionProposal {
                            ReplicaPlacementInfo oldLeader,
                            List<ReplicaPlacementInfo> oldReplicas,
                            List<ReplicaPlacementInfo> newReplicas) {
+    this(tp, partitionSize, oldLeader, oldReplicas, newReplicas, Collections.emptyMap());
+  }
+
+  /** Construct a disk-aware proposal with configured capacities in MB for each replica copy destination. */
+  public ExecutionProposal(TopicPartition tp,
+                           long partitionSize,
+                           ReplicaPlacementInfo oldLeader,
+                           List<ReplicaPlacementInfo> oldReplicas,
+                           List<ReplicaPlacementInfo> newReplicas,
+                           Map<Integer, Double> destinationDiskCapacityByBroker) {
     _tp = tp;
     _partitionSize = partitionSize;
     _oldLeader = oldLeader;
     // Allow the old replicas to be empty for partition addition.
     _oldReplicas = oldReplicas == null ? Collections.emptyList() : oldReplicas;
     _newReplicas = newReplicas;
+    _destinationDiskCapacityByBroker = Map.copyOf(destinationDiskCapacityByBroker);
     validate();
 
     // Populate replicas to add, to remove and to move across disk.
@@ -77,11 +91,30 @@ public class ExecutionProposal {
     newReplicas.stream().filter(r -> !_replicasToAdd.contains(r) && !_oldReplicas.contains(r))
                .forEach(r -> _replicasToMoveBetweenDisksByBroker.put(r.brokerId(), r));
 
+    Set<ReplicaPlacementInfo> diskDestinations = destinationReplicas();
+    if (!_destinationDiskCapacityByBroker.isEmpty()
+        && (_destinationDiskCapacityByBroker.size() != diskDestinations.size()
+            || diskDestinations.stream().anyMatch(r -> r.logdir() == null
+                || !_destinationDiskCapacityByBroker.containsKey(r.brokerId())
+                || !Double.isFinite(_destinationDiskCapacityByBroker.get(r.brokerId()))
+                || _destinationDiskCapacityByBroker.get(r.brokerId()) <= 0))) {
+      throw new IllegalArgumentException("Disk-aware proposals require a log directory and positive capacity for every destination replica.");
+    }
+
     // Verify the proposal will not generate both inter-broker movement and intra-broker replica movement at the same time.
     if (!_replicasToAdd.isEmpty() && !_replicasToMoveBetweenDisksByBroker.isEmpty()) {
       throw new IllegalArgumentException("Change from " + _oldReplicas + " to " + _newReplicas + " will generate both "
                                          + "intra-broker and inter-broker replica movements.");
     }
+  }
+
+  /**
+   * @return Destinations of inter-broker and intra-broker replica copies.
+   */
+  public Set<ReplicaPlacementInfo> destinationReplicas() {
+    Set<ReplicaPlacementInfo> destinations = new HashSet<>(_replicasToAdd);
+    destinations.addAll(_replicasToMoveBetweenDisksByBroker.values());
+    return destinations;
   }
 
   private static boolean brokerOrderMatched(Node[] currentOrderedReplicas, List<ReplicaPlacementInfo> replicas) {
@@ -191,6 +224,10 @@ public class ExecutionProposal {
     return Collections.unmodifiableSet(_replicasToAdd);
   }
 
+  public Map<Integer, Double> destinationDiskCapacityByBroker() {
+    return _destinationDiskCapacityByBroker;
+  }
+
   /**
    * @return The replicas that exist in old replica list but not in the new replica list.
    */
@@ -264,9 +301,14 @@ public class ExecutionProposal {
    * @return An object that can be further used to encode into JSON.
    */
   public Map<String, Object> getJsonStructure() {
-    return Map.of(TOPIC_PARTITION, _tp, OLD_LEADER, _oldLeader.brokerId(),
+    Map<String, Object> result = new HashMap<>(Map.of(TOPIC_PARTITION, _tp, OLD_LEADER, _oldLeader.brokerId(),
                   OLD_REPLICAS, _oldReplicas.stream().mapToInt(ReplicaPlacementInfo::brokerId).boxed().collect(Collectors.toList()),
-                  NEW_REPLICAS, _newReplicas.stream().mapToInt(ReplicaPlacementInfo::brokerId).boxed().collect(Collectors.toList()));
+                  NEW_REPLICAS, _newReplicas.stream().mapToInt(ReplicaPlacementInfo::brokerId).boxed().collect(Collectors.toList())));
+    if (!_destinationDiskCapacityByBroker.isEmpty()) {
+      result.put(DESTINATION_LOG_DIRS, destinationReplicas().stream().collect(Collectors.toMap(ReplicaPlacementInfo::brokerId,
+                                                                                   ReplicaPlacementInfo::logdir)));
+    }
+    return result;
   }
 
   @Override

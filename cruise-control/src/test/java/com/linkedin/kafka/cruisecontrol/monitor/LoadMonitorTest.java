@@ -27,6 +27,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.List;
 import java.util.Properties;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeoutException;
@@ -281,6 +282,22 @@ public class LoadMonitorTest {
     assertEquals(13, clusterModel.partition(T0P0).leader().load().expectedUtilizationFor(Resource.DISK), 0.0);
   }
 
+  @Test
+  public void testDiskCapacityCheckWithAndWithoutPlacementRequested() throws Exception {
+    for (boolean placementRequested : List.of(false, true)) {
+      TestContext context = prepareContext(NUM_WINDOWS, true, true);
+      KafkaPartitionMetricSampleAggregator aggregator = context.aggregator();
+      for (PartitionEntity entity : List.of(PE_T0P0, PE_T0P1, PE_T1P0, PE_T1P1)) {
+        CruiseControlUnitTestUtils.populateSampleAggregator(3, 4, aggregator, entity, 0, WINDOW_MS, METRIC_DEF);
+      }
+      ClusterModel model = context.loadmonitor().clusterModel(DEFAULT_START_TIME_FOR_CLUSTER_MODEL, Long.MAX_VALUE,
+          new ModelCompletenessRequirements(2, 1.0, false), placementRequested, true, new OperationProgress());
+      assertTrue(model.interBrokerDiskCapacityCheckEnabled());
+      assertEquals(4, model.broker(0).disk("/tmp/kafka-logs").replicas().size());
+      assertEquals(3, model.broker(1).disk("/tmp/kafka-logs-1").replicas().size());
+    }
+  }
+
   // Test build cluster model for JBOD broker.
   @Test
   public void testJbodClusterModel() throws NotEnoughValidWindowsException, TimeoutException, BrokerCapacityResolutionException {
@@ -512,6 +529,10 @@ public class LoadMonitorTest {
   }
 
   private TestContext prepareContext(int numWindowToPreserve, boolean isClusterJBOD) {
+    return prepareContext(numWindowToPreserve, isClusterJBOD, false);
+  }
+
+  private TestContext prepareContext(int numWindowToPreserve, boolean isClusterJBOD, boolean diskAwareInterBroker) {
     // Create mock metadata client.
     Metadata metadata = getMetadata(Arrays.asList(T0P0, T0P1, T1P0, T1P1));
     MetadataClient mockMetadataClient = EasyMock.mock(MetadataClient.class);
@@ -572,6 +593,8 @@ public class LoadMonitorTest {
           KafkaCruiseControlUnitTestUtils.class.getClassLoader().getResource("testCapacityConfigJBOD.json").getFile();
       props.setProperty(BrokerCapacityConfigFileResolver.CAPACITY_CONFIG_FILE, capacityConfigFileJBOD);
     }
+    props.put(com.linkedin.kafka.cruisecontrol.config.constants.AnalyzerConfig.INTER_BROKER_DISK_CAPACITY_CHECK_ENABLED_CONFIG,
+              Boolean.toString(diskAwareInterBroker));
     KafkaCruiseControlConfig config = new KafkaCruiseControlConfig(props);
     _time = new MockTime(0, START_TIME_MS, TimeUnit.NANOSECONDS.convert(START_TIME_MS, TimeUnit.MILLISECONDS));
     LoadMonitor loadMonitor = new LoadMonitor(config, mockMetadataClient, mockAdminClient, _time, new MetricRegistry(), METRIC_DEF);

@@ -440,13 +440,7 @@ public final class ParameterUtils {
     // 2. default.intra.broker.replication.throttle config
     // 3. Per-request replication_throttle (user's intent for this request)
     // 4. default.replication.throttle config (generic fallback)
-    Long defaultValue = config.getLong(ExecutorConfig.DEFAULT_INTRA_BROKER_REPLICATION_THROTTLE_CONFIG);
-    if (defaultValue == null) {
-      defaultValue = requestReplicationThrottle;
-    }
-    if (defaultValue == null) {
-      defaultValue = config.getLong(ExecutorConfig.DEFAULT_REPLICATION_THROTTLE_CONFIG);
-    }
+    Long defaultValue = resolveIntraBrokerReplicationThrottle(config, requestReplicationThrottle);
     Long value = getLongParam(requestContext, INTRA_BROKER_REPLICATION_THROTTLE_PARAM, defaultValue);
     if (value != null && value < 0) {
       throw new UserRequestException(
@@ -463,7 +457,20 @@ public final class ParameterUtils {
    * @return The resolved intra-broker replication throttle in bytes/second, or null if neither config is set.
    */
   public static Long resolveIntraBrokerReplicationThrottle(KafkaCruiseControlConfig config) {
+    return resolveIntraBrokerReplicationThrottle(config, null);
+  }
+
+  /**
+   * Resolve the intra-broker throttle with the request's generic throttle as fallback.
+   * @param config Cruise Control configuration
+   * @param requestReplicationThrottle per-request generic throttle, or null
+   * @return intra-broker default, request generic throttle, or generic default, in that order
+   */
+  public static Long resolveIntraBrokerReplicationThrottle(KafkaCruiseControlConfig config, Long requestReplicationThrottle) {
     Long value = config.getLong(ExecutorConfig.DEFAULT_INTRA_BROKER_REPLICATION_THROTTLE_CONFIG);
+    if (value == null) {
+      value = requestReplicationThrottle;
+    }
     if (value == null) {
       value = config.getLong(ExecutorConfig.DEFAULT_REPLICATION_THROTTLE_CONFIG);
     }

@@ -357,7 +357,8 @@ public abstract class AbstractGoal implements Goal {
                                                      replica.disk(),
                                                      disk,
                                                      ActionType.INTRA_BROKER_REPLICA_MOVEMENT);
-      if (!legitMoveBetweenDisks(replica, disk, ActionType.INTRA_BROKER_REPLICA_MOVEMENT)) {
+      if (!legitMoveBetweenDisks(replica, disk, ActionType.INTRA_BROKER_REPLICA_MOVEMENT)
+          || !clusterModel.canMoveReplicaToDisk(replica, disk)) {
         LOG.trace("Replica move to disk is not legit for {}.", proposal);
         continue;
       }
@@ -402,12 +403,14 @@ public abstract class AbstractGoal implements Goal {
       // 1. The swap from destination to source is legit.
       // 2. The goal requirements are not violated if this action is applied to the given cluster state.
       // 3. The movement is acceptable by the previously optimized goals.
-      if (!legitMoveBetweenDisks(sourceReplica, destinationReplica.disk(), ActionType.INTRA_BROKER_REPLICA_MOVEMENT)) {
+      if (!legitMoveBetweenDisks(sourceReplica, destinationReplica.disk(), ActionType.INTRA_BROKER_REPLICA_MOVEMENT)
+          || !clusterModel.canMoveReplicaToDisk(sourceReplica, destinationReplica.disk())) {
         LOG.trace("Swap from source to destination disk is not legit for {}.", swapProposal);
         return null;
       }
 
-      if (!legitMoveBetweenDisks(destinationReplica, sourceReplica.disk(), ActionType.INTRA_BROKER_REPLICA_MOVEMENT)) {
+      if (!legitMoveBetweenDisks(destinationReplica, sourceReplica.disk(), ActionType.INTRA_BROKER_REPLICA_MOVEMENT)
+          || !clusterModel.canMoveReplicaToDisk(destinationReplica, sourceReplica.disk())) {
         LOG.trace("Swap from destination to source disk is not legit for {}.", swapProposal);
         continue;
       }
@@ -421,8 +424,9 @@ public abstract class AbstractGoal implements Goal {
       ActionAcceptance acceptance = AnalyzerUtils.isProposalAcceptableForOptimizedGoals(optimizedGoals, swapProposal, clusterModel);
       LOG.trace("Trying to apply legit and self-satisfied swap {}, actionAcceptance = {}.", swapProposal, acceptance);
       if (acceptance == ACCEPT) {
+        String sourceLogdir = sourceReplica.disk().logDir();
         clusterModel.relocateReplica(sourceReplica.topicPartition(), sourceReplica.broker().id(), destinationReplica.disk().logDir());
-        clusterModel.relocateReplica(destinationReplica.topicPartition(), destinationReplica.broker().id(), sourceReplica.disk().logDir());
+        clusterModel.relocateReplica(destinationReplica.topicPartition(), destinationReplica.broker().id(), sourceLogdir);
         return destinationReplica;
       }
     }

@@ -148,6 +148,10 @@ public final class AnalyzerConfig {
    */
   public static final String DISK_CAPACITY_THRESHOLD_CONFIG = "disk.capacity.threshold";
   public static final double DEFAULT_DISK_CAPACITY_THRESHOLD = 0.8;
+  public static final String INTER_BROKER_DISK_CAPACITY_CHECK_ENABLED_CONFIG = "inter.broker.disk.capacity.check.enabled";
+  public static final String INTER_BROKER_DISK_CAPACITY_CHECK_ENABLED_DOC = "Select and reserve a destination log directory for "
+      + "inter-broker replica moves using individual disk capacities and live log-directory usage. Requires per-log-directory "
+      + "capacity configuration on all live brokers. Disabled by default.";
   public static final String DISK_CAPACITY_THRESHOLD_DOC = "The maximum percentage of the total broker.disk.capacity that is "
       + "allowed to be used on a broker. The analyzer will enforce a hard goal that the disk usage "
       + "of a broker cannot be higher than (broker.disk.capacity * disk.capacity.threshold).";
@@ -538,6 +542,11 @@ public final class AnalyzerConfig {
                             between(0, 1),
                             ConfigDef.Importance.HIGH,
                             DISK_CAPACITY_THRESHOLD_DOC)
+                    .define(INTER_BROKER_DISK_CAPACITY_CHECK_ENABLED_CONFIG,
+                            ConfigDef.Type.BOOLEAN,
+                            false,
+                            ConfigDef.Importance.HIGH,
+                            INTER_BROKER_DISK_CAPACITY_CHECK_ENABLED_DOC)
                     .define(NETWORK_INBOUND_CAPACITY_THRESHOLD_CONFIG,
                             ConfigDef.Type.DOUBLE,
                             DEFAULT_NETWORK_INBOUND_CAPACITY_THRESHOLD,
