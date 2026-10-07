@@ -2,6 +2,20 @@
  * Copyright 2017 LinkedIn Corp. Licensed under the BSD 2-Clause License (the "License"). See License in the project root for license information.
  */
 
+/*
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.linkedin.kafka.cruisecontrol.detector;
 
 import com.codahale.metrics.Meter;
@@ -31,6 +45,7 @@ import com.linkedin.kafka.cruisecontrol.model.ReplicaPlacementInfo;
 import com.linkedin.kafka.cruisecontrol.monitor.ModelGeneration;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Queue;
@@ -77,6 +92,8 @@ public class GoalViolationDetector extends AbstractAnomalyDetector implements Ru
   protected final Provisioner _provisioner;
   protected final Boolean _isProvisionerEnabled;
   private final BrokerCapacityConfigResolver _brokerCapacityConfigResolver;
+  private Map<Boolean, List<String>> _interBrokerViolations = Collections.emptyMap();
+  private Map<Boolean, List<String>> _intraBrokerViolations = Collections.emptyMap();
 
   public GoalViolationDetector(Queue<Anomaly> anomalies, KafkaCruiseControl kafkaCruiseControl, MetricRegistry dropwizardMetricRegistry) {
     super(anomalies, kafkaCruiseControl);
@@ -266,7 +283,7 @@ public class GoalViolationDetector extends AbstractAnomalyDetector implements Ru
         goalViolations.setProvisionResponse(_provisionResponse);
         _anomalies.add(goalViolations);
       }
-      refreshBalancednessScore(violatedGoalsByFixability);
+      refreshCombinedBalancednessScore(violatedGoalsByFixability, false);
     } catch (NotEnoughValidWindowsException nevwe) {
       LOG.debug("Skipping goal violation detection because there are not enough valid windows.", nevwe);
     } catch (KafkaCruiseControlException kcce) {
@@ -355,10 +372,10 @@ public class GoalViolationDetector extends AbstractAnomalyDetector implements Ru
       } finally {
         ctx.stop();
       }
-      _provisionResponse = provisionResponse;
+      _provisionResponse.aggregate(provisionResponse);
       if (_isProvisionerEnabled) {
         // Rightsize the cluster (if needed)
-        ProvisionerState provisionerState = _provisioner.rightsize(_provisionResponse.recommendationByRecommender(), new RightsizeOptions());
+        ProvisionerState provisionerState = _provisioner.rightsize(provisionResponse.recommendationByRecommender(), new RightsizeOptions());
         if (provisionerState != null) {
           LOG.info("Provisioner state: {}.", provisionerState);
           _automatedRightsizingMeter.mark();
@@ -366,10 +383,10 @@ public class GoalViolationDetector extends AbstractAnomalyDetector implements Ru
       }
       Map<Boolean, List<String>> violatedGoalsByFixability = goalViolations.violatedGoalsByFixability();
       if (!violatedGoalsByFixability.isEmpty()) {
-        goalViolations.setProvisionResponse(_provisionResponse);
+        goalViolations.setProvisionResponse(provisionResponse);
         _anomalies.add(goalViolations);
       }
-      refreshBalancednessScore(violatedGoalsByFixability);
+      refreshCombinedBalancednessScore(violatedGoalsByFixability, true);
     } catch (NotEnoughValidWindowsException nevwe) {
       LOG.debug("Skipping intra-broker goal violation detection because there are not enough valid windows.", nevwe);
     } catch (KafkaCruiseControlException kcce) {
@@ -411,6 +428,19 @@ public class GoalViolationDetector extends AbstractAnomalyDetector implements Ru
   protected void setBalancednessWithOfflineReplicas() {
     _balancednessScore = BALANCEDNESS_SCORE_WITH_OFFLINE_REPLICAS;
     _provisionResponse = new ProvisionResponse(ProvisionStatus.UNDECIDED);
+  }
+
+  protected void refreshCombinedBalancednessScore(Map<Boolean, List<String>> violations, boolean intraBroker) {
+    if (intraBroker) {
+      _intraBrokerViolations = violations;
+    } else {
+      _interBrokerViolations = violations;
+    }
+    Set<String> combined = new LinkedHashSet<>();
+    _interBrokerViolations.values().forEach(combined::addAll);
+    _intraBrokerViolations.values().forEach(combined::addAll);
+    // Balancedness depends on which goals are violated, regardless of whether the violations are fixable.
+    refreshBalancednessScore(Collections.singletonMap(true, new ArrayList<>(combined)));
   }
 
   protected void refreshBalancednessScore(Map<Boolean, List<String>> violatedGoalsByFixability) {

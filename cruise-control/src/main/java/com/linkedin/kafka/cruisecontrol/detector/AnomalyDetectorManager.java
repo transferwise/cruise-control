@@ -2,6 +2,20 @@
  * Copyright 2017 LinkedIn Corp. Licensed under the BSD 2-Clause License (the "License"). See License in the project root for license information.
  */
 
+/*
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.linkedin.kafka.cruisecontrol.detector;
 
 import com.codahale.metrics.Gauge;
@@ -187,7 +201,7 @@ public class AnomalyDetectorManager {
     for (KafkaAnomalyType anomalyType : KafkaAnomalyType.cachedValues()) {
       dropwizardMetricRegistry.register(MetricRegistry.name(ANOMALY_DETECTOR_SENSOR,
                                         String.format("%s-self-healing-enabled", anomalyType.toString().toLowerCase())),
-                                        (Gauge<Integer>) () -> _anomalyNotifier.selfHealingEnabled().get(anomalyType)
+                                        (Gauge<Integer>) () -> _anomalyNotifier.selfHealingEnabled().getOrDefault(anomalyType, false)
                                                                ? 1 : 0);
     }
 
@@ -519,12 +533,10 @@ public class AnomalyDetectorManager {
         LOG.info("Skipping {} fix because load monitor is in {} state.", anomalyType, loadMonitorTaskRunnerState);
         _anomalyDetectorState.onAnomalyHandle(_anomalyInProgress, AnomalyState.Status.LOAD_MONITOR_NOT_READY);
       } else {
-        // Need to deal with Intra Broker Goal Violations differently
-        if (anomalyType == KafkaAnomalyType.INTRA_BROKER_GOAL_VIOLATION
-                && _kafkaCruiseControl.meetCompletenessRequirements(_selfHealingIntraBrokerGoals)) {
+        List<String> goals = anomalyType == KafkaAnomalyType.INTRA_BROKER_GOAL_VIOLATION
+            ? _selfHealingIntraBrokerGoals : _selfHealingGoals;
+        if (_kafkaCruiseControl.meetCompletenessRequirements(goals)) {
           return true;
-        } else if (_kafkaCruiseControl.meetCompletenessRequirements(_selfHealingGoals)) {
-            return true;
         } else {
           LOG.warn("Skipping {} fix because load completeness requirement is not met for goals.", anomalyType);
           _anomalyDetectorState.onAnomalyHandle(_anomalyInProgress, AnomalyState.Status.COMPLETENESS_NOT_READY);

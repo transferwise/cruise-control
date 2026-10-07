@@ -132,3 +132,13 @@ This feature works with standard inter-broker and Kafka assigner goals. The capa
 When a broker does not report filesystem total and usable bytes, checks use Kafka replica bytes against configured disk capacity; that fallback does not account for other applications using the filesystem. Usage can grow after a check. Keep capacities accurate, retain disk headroom with `disk.capacity.threshold`, and generate a fresh proposal after changing disk capacities. A failure after installing some directory preferences can leave those preferences in Kafka even though the batch's broker reassignment was not submitted; partial placement acknowledgements are not transactional.
 
 The legacy reassignment submission helper accepts broker-only starts and cancellations. Disk-aware starts must use the overload that supplies the operator-configured threshold, log-directory timeout, and active tasks; omitting these inputs is rejected.
+
+### Compatibility of custom plugins
+
+Existing custom `BrokerCapacityConfigResolver` implementations remain compatible: `isJbodKafkaCluster()` defaults to `false`. Override it to return `true` when the resolver identifies a JBOD cluster and intra-broker anomaly detection should run. The built-in file resolver enables detection when any configured broker has more than one log directory. This detection setting is independent of `inter.broker.disk.capacity.check.enabled`.
+
+Existing custom `AnomalyNotifier` implementations inherit an `IGNORE` response for `onIntraBrokerGoalViolation`. Override this callback to handle the new anomaly type, and include `INTRA_BROKER_GOAL_VIOLATION` in the plugin's self-healing status maps. The built-in self-healing notifiers already implement this callback and honor `self.healing.intra.broker.goal.violation.enabled`, falling back to `self.healing.enabled`. A missing enable-status entry in an older plugin is reported as disabled.
+
+Intra-broker self-healing requires completeness for `self.healing.intra.broker.goals`; meeting only the inter-broker self-healing requirements cannot authorize an intra-broker fix.
+
+Inter-broker and intra-broker detection both contribute to the balancedness score. A healthy pass clears only its own violations; it does not erase violations from the other pass. Intra-broker provisioning results are aggregated with the inter-broker result rather than replacing it.
