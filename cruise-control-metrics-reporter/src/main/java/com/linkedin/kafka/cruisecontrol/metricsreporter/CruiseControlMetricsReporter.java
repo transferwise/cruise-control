@@ -2,20 +2,6 @@
  * Copyright 2017 LinkedIn Corp. Licensed under the BSD 2-Clause License (the "License"). See License in the project root for license information.
  */
 
-/*
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
-
 package com.linkedin.kafka.cruisecontrol.metricsreporter;
 
 import com.linkedin.kafka.cruisecontrol.metricsreporter.exception.CruiseControlMetricsReporterException;
@@ -146,7 +132,7 @@ public class CruiseControlMetricsReporter implements MetricsReporter, Runnable {
   static String getBootstrapServers(Map<String, ?> configs) {
     Object port = configs.get("port");
     String listeners = String.valueOf(configs.get("listeners"));
-    if (!"null".equals(listeners) && !listeners.isEmpty()) {
+    if (!"null".equals(listeners) && listeners.length() != 0) {
       // See https://kafka.apache.org/documentation/#listeners for possible responses. If multiple listeners are configured, this function
       // picks the first listener in the list of listeners. Hence, users of this config must adjust their order accordingly.
       String firstListener = listeners.split("\\s*,\\s*")[0];
