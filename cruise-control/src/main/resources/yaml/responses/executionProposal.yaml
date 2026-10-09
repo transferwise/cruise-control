@@ -23,6 +23,6 @@ ExecutionProposal:
         format: int32
     destinationLogDirs:
       type: object
-      description: Selected destination log directories by broker ID for disk-aware inter-broker replica additions.
+      description: Selected destination log directories by broker ID for disk-aware inter-broker replica additions or intra-broker disk moves.
       additionalProperties:
         type: string

@@ -2,25 +2,9 @@
  * Copyright 2017 LinkedIn Corp. Licensed under the BSD 2-Clause License (the "License"). See License in the project root for license information.
  */
 
-/*
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
-
 package com.linkedin.kafka.cruisecontrol.detector;
 
-import com.linkedin.kafka.cruisecontrol.KafkaCruiseControl;
 import com.linkedin.kafka.cruisecontrol.analyzer.ProvisionResponse;
-import com.linkedin.kafka.cruisecontrol.config.KafkaCruiseControlConfig;
 import com.linkedin.kafka.cruisecontrol.exception.KafkaCruiseControlException;
 import com.linkedin.kafka.cruisecontrol.servlet.handler.async.runnable.RebalanceRunnable;
 import com.linkedin.kafka.cruisecontrol.servlet.response.OptimizationResult;
@@ -33,10 +17,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.StringJoiner;
 
-import static com.linkedin.kafka.cruisecontrol.config.constants.AnomalyDetectorConfig.*;
-import static com.linkedin.kafka.cruisecontrol.detector.AnomalyDetectorUtils.getSelfHealingGoalNames;
-import static com.linkedin.kafka.cruisecontrol.detector.AnomalyUtils.extractKafkaCruiseControlObjectFromConfig;
-import static com.linkedin.kafka.cruisecontrol.detector.notifier.KafkaAnomalyType.GOAL_VIOLATION;
 
 
 /**
@@ -133,18 +113,6 @@ abstract class AbstractGoalViolations extends KafkaAnomaly {
         super.configure(configs);
         _violatedGoalsByFixability = new HashMap<>();
         _optimizationResult = null;
-        KafkaCruiseControl kafkaCruiseControl = extractKafkaCruiseControlObjectFromConfig(configs, GOAL_VIOLATION);
-        KafkaCruiseControlConfig config = kafkaCruiseControl.config();
-        boolean allowCapacityEstimation = config.getBoolean(ANOMALY_DETECTION_ALLOW_CAPACITY_ESTIMATION_CONFIG);
-        _excludeRecentlyDemotedBrokers = config.getBoolean(SELF_HEALING_EXCLUDE_RECENTLY_DEMOTED_BROKERS_CONFIG);
-        _excludeRecentlyRemovedBrokers = config.getBoolean(SELF_HEALING_EXCLUDE_RECENTLY_REMOVED_BROKERS_CONFIG);
-        _rebalanceRunnable = new RebalanceRunnable(kafkaCruiseControl,
-                getSelfHealingGoalNames(config),
-                allowCapacityEstimation,
-                _excludeRecentlyDemotedBrokers,
-                _excludeRecentlyRemovedBrokers,
-                _anomalyId.toString(),
-                reasonSupplier(),
-                stopOngoingExecution());
+
     }
 }

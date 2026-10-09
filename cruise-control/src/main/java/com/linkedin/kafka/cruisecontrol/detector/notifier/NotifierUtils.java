@@ -53,6 +53,23 @@ public final class NotifierUtils {
    * @return the {@link AlertSeverity} which correspond to the provided anomaly type
    */
   protected static AlertSeverity getAlertSeverity(AnomalyType anomalyType) {
+    // Scheduling priorities can change when anomaly types are added; Kafka alert severities must remain stable.
+    if (anomalyType instanceof KafkaAnomalyType) {
+      switch ((KafkaAnomalyType) anomalyType) {
+        case BROKER_FAILURE:
+          return AlertSeverity.CRITICAL;
+        case MAINTENANCE_EVENT:
+        case DISK_FAILURE:
+          return AlertSeverity.MAJOR;
+        case METRIC_ANOMALY:
+        case GOAL_VIOLATION:
+        case INTRA_BROKER_GOAL_VIOLATION:
+          return AlertSeverity.MINOR;
+        default:
+          return AlertSeverity.WARNING;
+      }
+    }
+    // Preserve the priority-based severity contract for custom anomaly types.
     switch (anomalyType.priority()) {
       case 0:
         return AlertSeverity.CRITICAL;

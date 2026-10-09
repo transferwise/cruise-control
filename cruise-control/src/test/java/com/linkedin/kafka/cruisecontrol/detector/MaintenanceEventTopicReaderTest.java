@@ -2,20 +2,6 @@
  * Copyright 2020 LinkedIn Corp. Licensed under the BSD 2-Clause License (the "License"). See License in the project root for license information.
  */
 
-/*
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
-
 package com.linkedin.kafka.cruisecontrol.detector;
 
 import com.linkedin.kafka.cruisecontrol.CruiseControlIntegrationTestHarness;
@@ -158,8 +144,10 @@ public class MaintenanceEventTopicReaderTest extends CruiseControlIntegrationTes
    * Retrieve the latest metadata for {@link #_topicDescription} and {@link #_topicConfig} topics.
    * To ensure the latest metadata update, admin clients retrieve the metadata from both brokers and ensure that they
    * have the same metadata.
+   *
+   * @return Whether both brokers reported consistent metadata in this bounded observation.
    */
-  private void retrieveLatestMetadata() throws InterruptedException, ExecutionException {
+  private boolean retrieveLatestMetadata() throws InterruptedException, ExecutionException, java.util.concurrent.TimeoutException {
     TopicDescription description0;
     TopicDescription description1;
     Config topicConfig0;
@@ -170,21 +158,23 @@ public class MaintenanceEventTopicReaderTest extends CruiseControlIntegrationTes
     AdminClient adminClient1 = KafkaCruiseControlUtils.createAdminClient(Collections.singletonMap(
         AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG, broker(1).plaintextAddr()));
     try {
-      while (true) {
-        description0 = adminClient0.describeTopics(Collections.singleton(TEST_TOPIC)).topicNameValues().get(TEST_TOPIC).get();
-        description1 = adminClient1.describeTopics(Collections.singleton(TEST_TOPIC)).topicNameValues().get(TEST_TOPIC).get();
-        topicConfig0 = adminClient0.describeConfigs(Collections.singleton(topicResource)).values().get(topicResource).get();
-        topicConfig1 = adminClient1.describeConfigs(Collections.singleton(topicResource)).values().get(topicResource).get();
-        if (description0 != null && description1 != null && topicConfig0 != null && topicConfig1 != null
-            && description0.partitions().size() == description1.partitions().size()
-            && description0.partitions().get(0).replicas().size() == description1.partitions().get(0).replicas().size()
-            && topicConfig0.get(RETENTION_MS_CONFIG).value().equals(topicConfig1.get(RETENTION_MS_CONFIG).value())) {
-          _topicDescription = description0;
-          _topicConfig = topicConfig0;
-          break;
-        }
-        Thread.sleep(50);
+      description0 = adminClient0.describeTopics(Collections.singleton(TEST_TOPIC)).topicNameValues()
+                                 .get(TEST_TOPIC).get(TEST_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
+      description1 = adminClient1.describeTopics(Collections.singleton(TEST_TOPIC)).topicNameValues()
+                                 .get(TEST_TOPIC).get(TEST_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
+      topicConfig0 = adminClient0.describeConfigs(Collections.singleton(topicResource)).values()
+                                 .get(topicResource).get(TEST_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
+      topicConfig1 = adminClient1.describeConfigs(Collections.singleton(topicResource)).values()
+                                 .get(topicResource).get(TEST_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
+      if (description0 != null && description1 != null && topicConfig0 != null && topicConfig1 != null
+          && description0.partitions().size() == description1.partitions().size()
+          && description0.partitions().get(0).replicas().size() == description1.partitions().get(0).replicas().size()
+          && topicConfig0.get(RETENTION_MS_CONFIG).value().equals(topicConfig1.get(RETENTION_MS_CONFIG).value())) {
+        _topicDescription = description0;
+        _topicConfig = topicConfig0;
+        return true;
       }
+      return false;
     } finally {
       KafkaCruiseControlUtils.closeAdminClientWithTimeout(adminClient0);
       KafkaCruiseControlUtils.closeAdminClientWithTimeout(adminClient1);
@@ -194,8 +184,10 @@ public class MaintenanceEventTopicReaderTest extends CruiseControlIntegrationTes
   private void verify(String partitionCount, String replicationFactor, String retentionMs, boolean testingTopicConfigUpdate) {
     waitUntilTrue(() -> {
       try {
-        retrieveLatestMetadata();
-      } catch (InterruptedException | ExecutionException e) {
+        if (!retrieveLatestMetadata()) {
+          return false;
+        }
+      } catch (InterruptedException | ExecutionException | java.util.concurrent.TimeoutException e) {
         return false;
       }
       // Verify that the maintenance event topic has the desired properties
@@ -243,10 +235,6 @@ public class MaintenanceEventTopicReaderTest extends CruiseControlIntegrationTes
                                                                                   parameterConfigOverrides);
 
     assertNotNull(maintenanceEventReader);
-    long start = System.currentTimeMillis();
-    while (System.currentTimeMillis() < start + 15000) {
-      //wait
-    }
     verify(newPartitionCount, newRF, newRetentionMs, true);
     Set<MaintenanceEvent> events = maintenanceEventReader.readEvents(TEST_TIMEOUT);
     EasyMock.verify(mockKafkaCruiseControl);

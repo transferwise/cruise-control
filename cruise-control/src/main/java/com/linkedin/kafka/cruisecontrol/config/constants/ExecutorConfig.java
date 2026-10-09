@@ -2,20 +2,6 @@
  * Copyright 2019 LinkedIn Corp. Licensed under the BSD 2-Clause License (the "License"). See License in the project root for license information.
  */
 
-/*
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
-
 package com.linkedin.kafka.cruisecontrol.config.constants;
 
 import com.linkedin.kafka.cruisecontrol.executor.ExecutorNoopNotifier;
@@ -219,6 +205,16 @@ public final class ExecutorConfig {
   public static final String LOGDIR_RESPONSE_TIMEOUT_MS_CONFIG = "logdir.response.timeout.ms";
   public static final long DEFAULT_LOGDIR_RESPONSE_TIMEOUT_MS = TimeUnit.SECONDS.toMillis(10);
   public static final String LOGDIR_RESPONSE_TIMEOUT_MS_DOC = "Timeout in ms for broker logdir to respond";
+
+  /**
+   * <code>inter.broker.disk.placement.max.consecutive.query.failures</code>
+   */
+  public static final String INTER_BROKER_DISK_PLACEMENT_MAX_CONSECUTIVE_QUERY_FAILURES_CONFIG =
+      "inter.broker.disk.placement.max.consecutive.query.failures";
+  public static final int DEFAULT_INTER_BROKER_DISK_PLACEMENT_MAX_CONSECUTIVE_QUERY_FAILURES = 10;
+  public static final String INTER_BROKER_DISK_PLACEMENT_MAX_CONSECUTIVE_QUERY_FAILURES_DOC =
+      "Maximum consecutive transient destination-directory query failures before stopping inter-broker execution and cancelling "
+      + "reassignments. A successful query resets the counter. This does not limit the duration of an active copy.";
 
   /**
    * <code>demotion.history.retention.time.ms</code>
@@ -634,6 +630,12 @@ public final class ExecutorConfig {
                             DEFAULT_LOGDIR_RESPONSE_TIMEOUT_MS,
                             ConfigDef.Importance.LOW,
                             LOGDIR_RESPONSE_TIMEOUT_MS_DOC)
+                    .define(INTER_BROKER_DISK_PLACEMENT_MAX_CONSECUTIVE_QUERY_FAILURES_CONFIG,
+                            ConfigDef.Type.INT,
+                            DEFAULT_INTER_BROKER_DISK_PLACEMENT_MAX_CONSECUTIVE_QUERY_FAILURES,
+                            atLeast(1),
+                            ConfigDef.Importance.MEDIUM,
+                            INTER_BROKER_DISK_PLACEMENT_MAX_CONSECUTIVE_QUERY_FAILURES_DOC)
                     .define(DEMOTION_HISTORY_RETENTION_TIME_MS_CONFIG,
                             ConfigDef.Type.LONG,
                             DEFAULT_DEMOTION_HISTORY_RETENTION_TIME_MS,

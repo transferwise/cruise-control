@@ -2,20 +2,6 @@
  * Copyright 2017 LinkedIn Corp. Licensed under the BSD 2-Clause License (the "License"). See License in the project root for license information.
  */
 
-/*
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
-
 package com.linkedin.kafka.cruisecontrol;
 
 import com.codahale.metrics.MetricRegistry;
@@ -661,6 +647,53 @@ public class KafkaCruiseControl {
       return false;
     }
     return true;
+  }
+
+  /**
+   * Execute the given balancing proposals for non-(demote/remove) operations.
+   * @param proposals the given balancing proposals
+   * @param unthrottledBrokers Brokers for which the rate of replica movements from/to will not be throttled.
+   * @param isKafkaAssignerMode {@code true} if kafka assigner mode, {@code false} otherwise.
+   * @param concurrentInterBrokerPartitionMovements The maximum number of concurrent inter-broker partition movements per broker
+   *                                                (if null, use num.concurrent.partition.movements.per.broker).
+   * @param maxInterBrokerPartitionMovements The upper bound of concurrent inter-broker partition movements in cluster
+   *                                                (if null, use num.concurrent.partition.movements.per.broker).
+   * @param concurrentIntraBrokerPartitionMovements The maximum number of concurrent intra-broker partition movements
+   *                                                (if null, use num.concurrent.intra.broker.partition.movements).
+   * @param clusterConcurrentLeaderMovements The maximum number of concurrent leader movements in a cluster
+   *                                  (if null, use num.concurrent.leader.movements).
+   * @param brokerConcurrentLeaderMovements The maximum number of concurrent leader movements involved in a broker
+   *                                  (if null, use num.concurrent.leader.movements.per.broker).
+   * @param executionProgressCheckIntervalMs The interval between checking and updating the progress of an initiated
+   *                                         execution (if null, use execution.progress.check.interval.ms).
+   * @param replicaMovementStrategy The strategy used to determine the execution order of generated replica movement tasks
+   *                                (if null, use default.replica.movement.strategies).
+   * @param replicationThrottle The replication throttle (bytes/second) to apply to both leaders and followers
+   *                            when executing proposals (if null, no throttling is applied).
+   * @param isTriggeredByUserRequest Whether the execution is triggered by a user request.
+   * @param uuid UUID of the execution.
+   * @param skipInterBrokerReplicaConcurrencyAdjustment {@code true} to skip auto adjusting concurrency of inter-broker
+   * replica movements even if the concurrency adjuster is enabled, {@code false} otherwise.
+   */
+  public void executeProposals(Set<ExecutionProposal> proposals,
+                               Set<Integer> unthrottledBrokers,
+                               boolean isKafkaAssignerMode,
+                               Integer concurrentInterBrokerPartitionMovements,
+                               Integer maxInterBrokerPartitionMovements,
+                               Integer concurrentIntraBrokerPartitionMovements,
+                               Integer clusterConcurrentLeaderMovements,
+                               Integer brokerConcurrentLeaderMovements,
+                               Long executionProgressCheckIntervalMs,
+                               ReplicaMovementStrategy replicaMovementStrategy,
+                               Long replicationThrottle,
+                               boolean isTriggeredByUserRequest,
+                               String uuid,
+                               boolean skipInterBrokerReplicaConcurrencyAdjustment) throws OngoingExecutionException {
+    executeProposals(proposals, unthrottledBrokers, isKafkaAssignerMode, concurrentInterBrokerPartitionMovements,
+        maxInterBrokerPartitionMovements, concurrentIntraBrokerPartitionMovements, clusterConcurrentLeaderMovements,
+        brokerConcurrentLeaderMovements, executionProgressCheckIntervalMs, replicaMovementStrategy, replicationThrottle,
+        com.linkedin.kafka.cruisecontrol.servlet.parameters.ParameterUtils.resolveIntraBrokerReplicationThrottle(_config, replicationThrottle),
+        isTriggeredByUserRequest, uuid, skipInterBrokerReplicaConcurrencyAdjustment);
   }
 
   /**

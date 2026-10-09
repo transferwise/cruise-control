@@ -2,20 +2,6 @@
  * Copyright 2018 LinkedIn Corp. Licensed under the BSD 2-Clause License (the "License"). See License in the project root for license information.
  */
 
-/*
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
-
 package com.linkedin.kafka.cruisecontrol.detector;
 
 import com.codahale.metrics.Gauge;
@@ -95,7 +81,8 @@ public class AnomalyDetectorState {
   private final AtomicLong _numSelfHealingFailedToStart;
   private final Map<AnomalyType, Meter> _anomalyRateByType;
   private double _balancednessScore;
-  private boolean _hasUnfixableGoals;
+  private boolean _interBrokerHasUnfixableGoals;
+  private boolean _intraBrokerHasUnfixableGoals;
   private final Map<AnomalyType, Timer> _anomalyDetectToFixCompleteTimer;
 
   public AnomalyDetectorState(Time time,
@@ -138,7 +125,10 @@ public class AnomalyDetectorState {
       dropwizardMetricRegistry.register(MetricRegistry.name(ANOMALY_DETECTOR_SENSOR, "ongoing-anomaly-duration-ms"),
                                         (Gauge<Long>) this::ongoingAnomalyDurationMs);
       dropwizardMetricRegistry.register(MetricRegistry.name(ANOMALY_DETECTOR_SENSOR, String.format("%s-has-unfixable-goals", GOAL_VIOLATION)),
-                                        (Gauge<Integer>) () -> hasUnfixableGoals() ? 1 : 0);
+                                        (Gauge<Integer>) () -> _interBrokerHasUnfixableGoals ? 1 : 0);
+      dropwizardMetricRegistry.register(
+          MetricRegistry.name(ANOMALY_DETECTOR_SENSOR, String.format("%s-has-unfixable-goals", INTRA_BROKER_GOAL_VIOLATION)),
+          (Gauge<Integer>) () -> _intraBrokerHasUnfixableGoals ? 1 : 0);
 
       _anomalyRateByType = new HashMap<>();
       _anomalyRateByType.put(BROKER_FAILURE,
@@ -165,7 +155,8 @@ public class AnomalyDetectorState {
       KafkaAnomalyType.cachedValues().forEach(anomalyType -> _anomalyRateByType.put(anomalyType, new Meter()));
     }
     _balancednessScore = INITIAL_BALANCEDNESS_SCORE;
-    _hasUnfixableGoals = false;
+    _interBrokerHasUnfixableGoals = false;
+    _intraBrokerHasUnfixableGoals = false;
   }
 
   /**
@@ -183,7 +174,7 @@ public class AnomalyDetectorState {
    * @param goalViolations Goal violation to check whether there are unfixable goals.
    */
   void refreshHasUnfixableGoal(GoalViolations goalViolations) {
-    _hasUnfixableGoals = AnomalyDetectorUtils.hasUnfixableGoals(goalViolations);
+    _interBrokerHasUnfixableGoals = AnomalyDetectorUtils.hasUnfixableGoals(goalViolations);
   }
 
   /**
@@ -192,22 +183,23 @@ public class AnomalyDetectorState {
    * @param goalViolations Goal violation to check whether there are unfixable goals.
    */
   void refreshHasUnfixableGoal(IntraBrokerGoalViolations goalViolations) {
-    _hasUnfixableGoals = AnomalyDetectorUtils.hasUnfixableGoals(goalViolations);
+    _intraBrokerHasUnfixableGoals = AnomalyDetectorUtils.hasUnfixableGoals(goalViolations);
   }
 
   /**
-   * @return {@code true} if the latest goal violation contains unfixable goals, {@code false} if either the latest goal violation
-   * contains no unfixable goals or if any execution was started after the latest goal violation.
+   * @return {@code true} if the latest inter-broker or intra-broker goal violation contains unfixable goals.
+   * Each type updates only its own contribution; starting execution clears both contributions.
    */
   public boolean hasUnfixableGoals() {
-    return _hasUnfixableGoals;
+    return _interBrokerHasUnfixableGoals || _intraBrokerHasUnfixableGoals;
   }
 
   /**
    * Resets the state corresponding to {@link #hasUnfixableGoals()}.
    */
   void resetHasUnfixableGoals() {
-    _hasUnfixableGoals = false;
+    _interBrokerHasUnfixableGoals = false;
+    _intraBrokerHasUnfixableGoals = false;
   }
 
   /**

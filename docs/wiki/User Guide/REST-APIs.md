@@ -368,6 +368,8 @@ When rebalancing a cluster, all the brokers in the cluster(except recently remov
 * By throttling the bandwidth used to move replicas between disks within a broker (intra-broker/log dir reassignment). It is gated by the request parameter `intra_broker_replication_throttle`. If not set, it falls back to the config `default.intra.broker.replication.throttle`, then the per-request `replication_throttle` value, then the config `default.replication.throttle`.
 
 ### Add a list of new brokers to Kafka Cluster
+
+Broker addition, broker removal, and offline-replica repair optimize inter-broker goals. Explicit `goals` containing configured intra-broker goals are rejected before stopping an existing execution or generating a model. Mixed default or automated self-healing goal lists use only their inter-broker subset, preserving priority order; an empty supported subset is rejected. Use a separate `rebalance_disk=true` request for disk balancing. This restriction applies with disk-capacity checking enabled or disabled; disk-aware inter-broker placement remains available when enabled.
 The following POST request adds the given brokers to the Kafka cluster
 
     POST /kafkacruisecontrol/add_broker?brokerid=[id1,id2...]
@@ -624,6 +626,8 @@ Supported parameters are:
 | fast_mode                                  | boolean  | true to compute proposals in fast mode, false otherwise                                                                              | true                   | yes       |
 
 Changing topic's replication factor will not move any existing replicas. `goals` are used to determine which replica to be deleted(to decrease topic's replication factor) and which broker to assign new replica (to increase topic's replication factor).
+
+RF changes optimize only inter-broker goals. Explicit `goals` containing configured intra-broker goals are rejected; when using `default.goals` or automated RF self-healing, only the inter-broker subset is applied, preserving its priority order. If that subset is empty, the request is rejected. Use a separate `rebalance_disk=true` rebalance request for intra-broker disk balancing. Individual destination-disk capacity checks still apply to RF increases when `inter.broker.disk.capacity.check.enabled=true`.
 
 Note sometimes the topic regex can be too long to put at POST request head, in this case user can specify topic regex and target replication factor pairs in POST request body. For details, check [Change-topic-replication-factor-through-Cruise-Control wiki page](https://github.com/linkedin/cruise-control/wiki/Change-topic-replication-factor-through-Cruise-Control).
 

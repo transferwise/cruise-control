@@ -41,6 +41,7 @@ import com.linkedin.kafka.cruisecontrol.servlet.UserTaskManager;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
@@ -62,6 +63,9 @@ import org.apache.kafka.clients.admin.AlterPartitionReassignmentsResult;
 import org.apache.kafka.clients.admin.DescribeConfigsResult;
 import org.apache.kafka.clients.admin.ElectLeadersResult;
 import org.apache.kafka.clients.admin.PartitionReassignment;
+import org.apache.kafka.clients.admin.TopicDescription;
+import org.apache.kafka.common.KafkaFuture;
+import org.apache.kafka.common.errors.UnknownTopicOrPartitionException;
 import org.apache.kafka.common.Cluster;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.config.ConfigResource;
@@ -113,6 +117,9 @@ public class Executor {
   private final AtomicInteger _stopSignal;
   private final Time _time;
   private volatile boolean _hasOngoingExecution;
+  private volatile IntraBrokerReplicationThrottleHelper _pendingIntraBrokerThrottleCleanup;
+  private volatile ReplicationThrottleHelper _pendingInterBrokerThrottleCleanup;
+  private volatile Set<ExecutionTask> _unresolvedIntraBrokerCopies = Collections.emptySet();
   private final Semaphore _flipOngoingExecutionMutex;
   private final Semaphore _noOngoingExecutionSemaphore;
   private volatile ExecutorState _executorState;
@@ -806,6 +813,59 @@ public class Executor {
    * @param replicaMovementStrategy The strategy used to determine the execution order of generated replica movement tasks.
    * @param replicationThrottle The replication throttle (bytes/second) to apply to both leaders and followers
    *                            when executing a proposal (if null, no throttling is applied).
+   * @param isTriggeredByUserRequest Whether the execution is triggered by a user request.
+   * @param uuid UUID of the execution.
+   * @param isKafkaAssignerMode {@code true} if kafka assigner mode, {@code false} otherwise.
+   * @param skipInterBrokerReplicaConcurrencyAdjustment {@code true} to skip auto adjusting concurrency of inter-broker
+   * replica movements even if the concurrency adjuster is enabled, {@code false} otherwise.
+   */
+  public synchronized void executeProposals(Collection<ExecutionProposal> proposals,
+                                            Set<Integer> unthrottledBrokers,
+                                            Set<Integer> removedBrokers,
+                                            LoadMonitor loadMonitor,
+                                            Integer requestedInterBrokerPartitionMovementConcurrency,
+                                            Integer requestedMaxClusterPartitionMovements,
+                                            Integer requestedIntraBrokerPartitionMovementConcurrency,
+                                            Integer requestedClusterLeadershipMovementConcurrency,
+                                            Integer requestedBrokerLeadershipMovementConcurrency,
+                                            Long requestedExecutionProgressCheckIntervalMs,
+                                            ReplicaMovementStrategy replicaMovementStrategy,
+                                            Long replicationThrottle,
+                                            boolean isTriggeredByUserRequest,
+                                            String uuid,
+                                            boolean isKafkaAssignerMode,
+                                            boolean skipInterBrokerReplicaConcurrencyAdjustment) throws OngoingExecutionException {
+    executeProposals(proposals, unthrottledBrokers, removedBrokers, loadMonitor,
+        requestedInterBrokerPartitionMovementConcurrency, requestedMaxClusterPartitionMovements,
+        requestedIntraBrokerPartitionMovementConcurrency, requestedClusterLeadershipMovementConcurrency,
+        requestedBrokerLeadershipMovementConcurrency, requestedExecutionProgressCheckIntervalMs, replicaMovementStrategy,
+        replicationThrottle,
+        com.linkedin.kafka.cruisecontrol.servlet.parameters.ParameterUtils.resolveIntraBrokerReplicationThrottle(_config, replicationThrottle),
+        isTriggeredByUserRequest, uuid, isKafkaAssignerMode, skipInterBrokerReplicaConcurrencyAdjustment);
+  }
+
+  /**
+   * Initialize proposal execution and start execution.
+   *
+   * @param proposals Proposals to be executed.
+   * @param unthrottledBrokers Brokers that are not throttled in terms of the number of in/out replica movements.
+   * @param removedBrokers Removed brokers, null if no brokers has been removed.
+   * @param loadMonitor Load monitor.
+   * @param requestedInterBrokerPartitionMovementConcurrency The maximum number of concurrent inter-broker partition movements
+   *                                                         per broker(if null, use num.concurrent.partition.movements.per.broker).
+   * @param requestedIntraBrokerPartitionMovementConcurrency The maximum number of concurrent intra-broker partition movements
+   *                                                         (if null, use num.concurrent.intra.broker.partition.movements).
+   * @param requestedMaxClusterPartitionMovements The upper bound of concurrent inter broker partition movements in cluster
+   *                                              (if null, use max.num.cluster.partition.movements).
+   * @param requestedClusterLeadershipMovementConcurrency The maximum number of concurrent leader movements in a cluster
+   *                                               (if null, use num.concurrent.leader.movements).
+   * @param requestedBrokerLeadershipMovementConcurrency The maximum number of concurrent leader movements involved in a broker
+   *                                               (if null, use num.concurrent.leader.movements.per.broker).
+   * @param requestedExecutionProgressCheckIntervalMs The interval between checking and updating the progress of an initiated
+   *                                                  execution (if null, use execution.progress.check.interval.ms).
+   * @param replicaMovementStrategy The strategy used to determine the execution order of generated replica movement tasks.
+   * @param replicationThrottle The replication throttle (bytes/second) to apply to both leaders and followers
+   *                            when executing a proposal (if null, no throttling is applied).
    * @param intraBrokerReplicationThrottle The intra-broker replication throttle (bytes/second) to apply during
    *                                      log dir reassignment (if null, no throttling is applied).
    * @param isTriggeredByUserRequest Whether the execution is triggered by a user request.
@@ -1089,7 +1149,76 @@ public class Executor {
       if (hasOngoingIntraBrokerReplicaMovement) {
         throw new OngoingExecutionException("There are ongoing intra-broker partition movements.");
       }
+      if (_pendingInterBrokerThrottleCleanup != null) {
+        try {
+          _pendingInterBrokerThrottleCleanup.clearAllThrottles();
+          _pendingInterBrokerThrottleCleanup = null;
+        } catch (ExecutionException | InterruptedException | TimeoutException | RuntimeException e) {
+          throw new IllegalStateException("Failed to restore throttles retained for unresolved inter-broker reassignments.", e);
+        }
+      }
+      // Unknown copies from a previous execution retain their limits until Kafka confirms no disk copy is active.
+      if (_pendingIntraBrokerThrottleCleanup != null) {
+        try {
+          Set<ExecutionTask> failedDisks = new HashSet<>();
+          Map<ExecutionTask, ReplicaLogDirInfo> placements = _unresolvedIntraBrokerCopies.isEmpty() ? Map.of()
+              : getLogdirInfoForExecutionTask(_unresolvedIntraBrokerCopies, _adminClient, _config, null, failedDisks);
+          // Failed disks cannot continue copying; the global check above still protects active copies on healthy disks.
+          Set<ExecutionTask> copiesWithoutDiskFailure = _unresolvedIntraBrokerCopies.stream()
+              .filter(task -> !failedDisks.contains(task)).collect(Collectors.toSet());
+          Set<ExecutionTask> removedReplicas = confirmedRemovedReplicas(copiesWithoutDiskFailure, placements);
+          for (ExecutionTask task : _unresolvedIntraBrokerCopies) {
+            ReplicaLogDirInfo placement = placements.get(task);
+            if (!failedDisks.contains(task) && !removedReplicas.contains(task)
+                && (placement == null || placement.getCurrentReplicaLogDir() == null || placement.getFutureReplicaLogDir() != null)) {
+              throw new OngoingExecutionException("Cannot confirm completion of retained intra-broker copy " + task);
+            }
+          }
+          _pendingIntraBrokerThrottleCleanup.clearAllThrottles();
+          _pendingIntraBrokerThrottleCleanup = null;
+          _unresolvedIntraBrokerCopies = Collections.emptySet();
+        } catch (ExecutionException | InterruptedException | TimeoutException | RuntimeException e) {
+          throw new IllegalStateException("Failed to restore throttles retained for unresolved intra-broker copies.", e);
+        }
+      }
     }
+  }
+
+  private Set<ExecutionTask> confirmedRemovedReplicas(Set<ExecutionTask> retained, Map<ExecutionTask, ReplicaLogDirInfo> placements)
+      throws ExecutionException, InterruptedException, TimeoutException, OngoingExecutionException {
+    Set<String> topics = retained.stream().filter(task -> placements.get(task) == null
+        || placements.get(task).getCurrentReplicaLogDir() == null).map(task -> task.proposal().topic()).collect(Collectors.toSet());
+    if (topics.isEmpty()) {
+      return Collections.emptySet();
+    }
+    // Use a fresh admin response, rather than inferring deletion from a missing cached metadata entry.
+    Map<String, KafkaFuture<TopicDescription>> futures = _adminClient.describeTopics(topics).topicNameValues();
+    Map<String, TopicDescription> descriptions = new java.util.HashMap<>();
+    for (String topic : topics) {
+      if (!futures.containsKey(topic)) {
+        throw new OngoingExecutionException("Missing topic description for retained disk copy of " + topic);
+      }
+      try {
+        TopicDescription description = futures.get(topic).get(_config.getInt(ExecutorConfig.ADMIN_CLIENT_REQUEST_TIMEOUT_MS_CONFIG),
+                                                              TimeUnit.MILLISECONDS);
+        if (description == null) {
+          throw new OngoingExecutionException("Empty topic description for retained disk copy of " + topic);
+        }
+        descriptions.put(topic, description);
+      } catch (ExecutionException e) {
+        if (e.getCause() instanceof UnknownTopicOrPartitionException) {
+          descriptions.put(topic, null);
+        } else {
+          throw e;
+        }
+      }
+    }
+    return retained.stream().filter(task -> topics.contains(task.proposal().topic())).filter(task -> {
+      TopicDescription description = descriptions.get(task.proposal().topic());
+      return description == null || description.partitions().stream().noneMatch(partition ->
+          partition.partition() == task.proposal().partitionId()
+              && partition.replicas().stream().anyMatch(broker -> broker.id() == task.brokerId()));
+    }).collect(Collectors.toSet());
   }
 
   private void processExecuteProposalsFailure() {
@@ -1311,12 +1440,15 @@ public class Executor {
     private final Long _replicationThrottle;
     private final Long _intraBrokerReplicationThrottle;
     private final LogdirQueryFailureTracker _logdirQueryFailures = new LogdirQueryFailureTracker();
+    private final Map<ExecutionTask, Integer> _intraBrokerFutureDirectoryMismatches = new HashMap<>();
+    private final Set<ExecutionTask> _intraBrokerCopiesWithUnknownState = new HashSet<>();
     private Throwable _executionException;
     private int _interBrokerPlacementQueryFailures;
     private boolean _interBrokerReassignmentSettlementFailed;
     private final boolean _isTriggeredByUserRequest;
     private long _lastSlowTaskReportingTimeMs;
     private static final boolean FORCE_PAUSE_SAMPLING = true;
+    private static final int MAX_CONSECUTIVE_FUTURE_DIRECTORY_MISMATCHES = 3;
     private final Timer _executionTimerInvolveBrokerRemovalOrDemotion;
 
     private final Collection<Integer> _demotedBrokers;
@@ -1715,19 +1847,30 @@ public class Executor {
             waitForInterBrokerReplicaTasksToFinish(null);
           }
           settled = !_interBrokerReassignmentSettlementFailed;
+        } catch (ExecutionException | InterruptedException | TimeoutException | RuntimeException e) {
+          if (_executionException == null) {
+            _executionException = e;
+          } else if (_executionException != e) {
+            _executionException.addSuppressed(e);
+          }
+          LOG.error("User task {}: Failed to settle inter-broker reassignments during cleanup.", _uuid, e);
         } finally {
           resetExecutionProgressCheckIntervalMs();
           if (settled) {
             try {
               throttleHelper.clearAllThrottles();
-            } catch (ExecutionException | InterruptedException | TimeoutException | IllegalStateException e) {
+            } catch (ExecutionException | InterruptedException | TimeoutException | RuntimeException e) {
+              _pendingInterBrokerThrottleCleanup = throttleHelper;
               LOG.error("User task {}: Failed final inter-broker throttle cleanup.", _uuid, e);
               if (_executionException == null) {
                 _executionException = e;
               }
             }
           } else {
-            LOG.error("User task {}: Reassignments could not be settled; retaining replication throttles.", _uuid);
+            _pendingInterBrokerThrottleCleanup = throttleHelper;
+            LOG.error("User task {}: Reassignments could not be settled; retaining replication throttles. "
+                      + "Cleanup will be retried before the next execution after Kafka confirms no copies remain. "
+                      + "After a process restart, verify completion before restoring throttles manually.", _uuid);
           }
         }
       }
@@ -1777,7 +1920,7 @@ public class Executor {
                                                                           / totalDataToMoveInMB));
           List<ExecutionTask> inProgressTasks = new ArrayList<>(inExecutionTasks());
           try {
-            throttleHelper.clearThrottles(completedTasks, inProgressTasks);
+            clearSettledIntraBrokerThrottles(throttleHelper, completedTasks, inProgressTasks);
           } catch (ExecutionException | InterruptedException | TimeoutException | IllegalStateException e) {
             LOG.warn("User task {}: Failed to clear intra-broker replication throttle for completed tasks on brokers {}. "
                      + "Throttle will be removed during final cleanup.",
@@ -1796,7 +1939,7 @@ public class Executor {
           List<ExecutionTask> completedTasks = waitForIntraBrokerReplicaTasksToFinish();
           inExecutionTasks = inExecutionTasks();
           try {
-            throttleHelper.clearThrottles(completedTasks, new ArrayList<>(inExecutionTasks));
+            clearSettledIntraBrokerThrottles(throttleHelper, completedTasks, new ArrayList<>(inExecutionTasks));
           } catch (ExecutionException | InterruptedException | TimeoutException | IllegalStateException e) {
             LOG.warn("User task {}: Failed to clear intra-broker replication throttle during stop-wait. "
                      + "Throttle will be removed during final cleanup.", _uuid, e);
@@ -1823,9 +1966,32 @@ public class Executor {
                    executionTasksSummary.taskStat().get(LEADER_ACTION).get(ExecutionTaskState.PENDING));
         }
       } finally {
+        // Also drain copies when a throttle RPC or another unexpected exception exits the submission loop.
+        if (!inExecutionTasks().isEmpty()) {
+          stopExecution();
+          try {
+            while (!inExecutionTasks().isEmpty()) {
+              waitForIntraBrokerReplicaTasksToFinish();
+            }
+          } catch (RuntimeException e) {
+            _intraBrokerCopiesWithUnknownState.addAll(inExecutionTasks());
+            if (_executionException == null) {
+              _executionException = e;
+            }
+          }
+        }
+        if (!_intraBrokerCopiesWithUnknownState.isEmpty()) {
+          _pendingIntraBrokerThrottleCleanup = throttleHelper;
+          _unresolvedIntraBrokerCopies = Set.copyOf(_intraBrokerCopiesWithUnknownState);
+          LOG.error("User task {}: Retaining intra-broker throttles and unresolved copy records for {}. "
+                    + "Cleanup will be retried before the next execution after Kafka confirms no disk copies remain. "
+                    + "After a process restart, verify completion before restoring these broker throttles manually.",
+                    _uuid, _unresolvedIntraBrokerCopies);
+        }
         try {
-          throttleHelper.clearAllThrottles();
+          throttleHelper.clearAllThrottles(unresolvedIntraBrokerCopyBrokers());
         } catch (ExecutionException | InterruptedException | TimeoutException | IllegalStateException e) {
+          _pendingIntraBrokerThrottleCleanup = throttleHelper;
           LOG.error("User task {}: Failed to clear intra-broker replication throttles during cleanup. "
                     + "Broker config {} may remain active on participating brokers and require manual removal.",
                     _uuid, IntraBrokerReplicationThrottleHelper.REPLICA_ALTER_LOG_DIRS_IO_MAX_BYTES_PER_SECOND_CONFIG, e);
@@ -1834,6 +2000,18 @@ public class Executor {
           }
         }
       }
+    }
+
+    private Set<Integer> unresolvedIntraBrokerCopyBrokers() {
+      return _intraBrokerCopiesWithUnknownState.stream().map(ExecutionTask::brokerId).collect(Collectors.toSet());
+    }
+
+    private void clearSettledIntraBrokerThrottles(IntraBrokerReplicationThrottleHelper helper,
+                                                 List<ExecutionTask> completed, List<ExecutionTask> inProgress)
+        throws ExecutionException, InterruptedException, TimeoutException {
+      Set<Integer> unresolvedBrokers = unresolvedIntraBrokerCopyBrokers();
+      helper.clearThrottles(completed.stream().filter(t -> !unresolvedBrokers.contains(t.brokerId()))
+          .collect(Collectors.toList()), inProgress);
     }
 
     /**
@@ -1953,13 +2131,24 @@ public class Executor {
               : Collections.emptySet();
           _interBrokerPlacementQueryFailures = 0;
         } catch (IllegalStateException e) {
-          boolean transientQuery = e.getCause() instanceof ExecutionException || e.getCause() instanceof TimeoutException;
-          if (!transientQuery || ++_interBrokerPlacementQueryFailures >= 3) {
+          Throwable queryFailure = e.getCause();
+          while (queryFailure instanceof ExecutionException && queryFailure.getCause() != null) {
+            queryFailure = queryFailure.getCause();
+          }
+          boolean failedDisk = queryFailure instanceof org.apache.kafka.common.errors.KafkaStorageException
+              || queryFailure instanceof org.apache.kafka.common.errors.LogDirNotFoundException;
+          boolean transientQuery = !failedDisk && (queryFailure instanceof TimeoutException
+              || queryFailure instanceof org.apache.kafka.common.errors.RetriableException);
+          ++_interBrokerPlacementQueryFailures;
+          // A transient query failure alone must not retry forever: cap consecutive transient failures so a
+          // persistently flaky (but technically retriable) AdminClient response still aborts instead of hanging.
+          int maxQueryFailures = _config.getInt(ExecutorConfig.INTER_BROKER_DISK_PLACEMENT_MAX_CONSECUTIVE_QUERY_FAILURES_CONFIG);
+          if (!transientQuery || _interBrokerPlacementQueryFailures >= maxQueryFailures) {
             _executionException = e;
             stopExecution();
           }
-          LOG.warn("User task {}: Unable to confirm disk placement; retaining task tracking (consecutive query failures: {}).",
-                   _uuid, _interBrokerPlacementQueryFailures, e);
+          LOG.warn("User task {}: Unable to confirm disk placement; retaining task tracking (consecutive query failures: {}/{}).",
+                   _uuid, _interBrokerPlacementQueryFailures, maxQueryFailures, e);
         }
         for (ExecutionTask task : inExecutionTasks()) {
           TopicPartition tp = task.proposal().topicPartition();
@@ -2113,10 +2302,12 @@ public class Executor {
         // If there is no finished tasks, we need to check if anything is blocked.
         maybeReexecuteIntraBrokerReplicaTasks();
         Cluster cluster = getClusterForExecutionProgressCheck();
-        Set<ExecutionTask> nonRetriableFailures = new HashSet<>();
+        // An unavailable replica does not prove that its Kafka disk copy has stopped.
+        // Only confirmed storage or missing-directory errors permit forgetting the copy.
+        Set<ExecutionTask> failedDisks = new HashSet<>();
         Map<ExecutionTask, ReplicaLogDirInfo> logDirInfoByTask = getLogdirInfoForExecutionTask(
             _executionTaskManager.inExecutionTasks(Collections.singleton(INTRA_BROKER_REPLICA_ACTION)),
-            _adminClient, _config, nonRetriableFailures);
+            _adminClient, _config, null, failedDisks);
 
         List<ExecutionTask> slowTasksToReport = new ArrayList<>();
         boolean shouldReportSlowTasks = _time.milliseconds() - _lastSlowTaskReportingTimeMs > _slowTaskAlertingBackoffTimeMs;
@@ -2130,7 +2321,7 @@ public class Executor {
             if (shouldReportSlowTasks) {
               task.maybeReportExecutionTooSlow(_time.milliseconds(), slowTasksToReport);
             }
-            if (maybeMarkTaskAsDead(cluster, logDirInfoByTask, task, null, nonRetriableFailures)) {
+            if (maybeMarkTaskAsDead(cluster, logDirInfoByTask, task, null, failedDisks)) {
               deadTaskIds.add(task.executionId());
               finishedTasks.add(task);
             }
@@ -2255,7 +2446,7 @@ public class Executor {
                                         Map<ExecutionTask, ReplicaLogDirInfo> logdirInfoByTask,
                                         ExecutionTask task,
                                         Set<TopicPartition> deadInterBrokerReassignments,
-                                        Set<ExecutionTask> nonRetriableLogdirFailures) {
+                                        Set<ExecutionTask> confirmedDiskFailures) {
       // Only check tasks with IN_PROGRESS or ABORTING state.
       if (task.state() == ExecutionTaskState.IN_PROGRESS || task.state() == ExecutionTaskState.ABORTING) {
         switch (task.type()) {
@@ -2285,12 +2476,34 @@ public class Executor {
 
           case INTRA_BROKER_REPLICA_ACTION:
             boolean querySucceeded = logdirInfoByTask.containsKey(task);
-            boolean isNonRetriable = nonRetriableLogdirFailures != null && nonRetriableLogdirFailures.contains(task);
+            boolean diskFailed = confirmedDiskFailures != null && confirmedDiskFailures.contains(task);
             boolean stopRequested = _stopSignal.get() != NO_STOP_EXECUTION;
-            if (_logdirQueryFailures.shouldMarkDead(task, querySucceeded, stopRequested, isNonRetriable)) {
+            String futureLogdir = querySucceeded ? logdirInfoByTask.get(task).getFutureReplicaLogDir() : null;
+            String targetLogdir = task.proposal().replicasToMoveBetweenDisksByBroker().get(task.brokerId()).logdir();
+            boolean redirectedCopy = futureLogdir != null && !targetLogdir.equals(futureLogdir);
+            boolean persistentRedirect = false;
+            if (redirectedCopy) {
+              persistentRedirect = _intraBrokerFutureDirectoryMismatches.merge(task, 1, Integer::sum)
+                  >= MAX_CONSECUTIVE_FUTURE_DIRECTORY_MISMATCHES;
+            } else {
+              _intraBrokerFutureDirectoryMismatches.remove(task);
+            }
+            if (persistentRedirect || _logdirQueryFailures.shouldMarkDead(task, querySucceeded, stopRequested, diskFailed)) {
+              if (persistentRedirect || (!querySucceeded && !diskFailed)) {
+                // Ending task polling does not cancel the Kafka copy or permit removing its throttle.
+                _intraBrokerCopiesWithUnknownState.add(task);
+                if (_executionException == null) {
+                  _executionException = new IllegalStateException(persistentRedirect
+                      ? "Intra-broker copy " + task + " repeatedly targets " + futureLogdir + " instead of " + targetLogdir
+                      : "Cannot confirm completion of intra-broker copy " + task);
+                }
+                stopExecution();
+              }
+              _intraBrokerFutureDirectoryMismatches.remove(task);
               _executionTaskManager.markTaskDead(task);
-              String reason = isNonRetriable ? "non-retriable logdir query failure"
-                  : stopRequested ? "stop-wait logdir query retries exhausted" : "logdir metadata unavailable during normal execution";
+              String reason = persistentRedirect ? "persistent future log directory mismatch"
+                  : diskFailed ? "confirmed disk failure"
+                  : stopRequested ? "stop-wait logdir query retries exhausted" : "normal-execution logdir query retries exhausted";
               LOG.warn("User task {}: Killing execution for task {} because of {}.", _uuid, task, reason);
               return true;
             }
@@ -2313,8 +2526,20 @@ public class Executor {
      *             corresponding inter-broker replica reassignment tasks.
      */
     private void maybeReexecuteInterBrokerReplicaTasks(Set<TopicPartition> deleted, Set<TopicPartition> dead) {
-      List<ExecutionTask> candidateInterBrokerReplicaTasksToReexecute =
+      List<ExecutionTask> activeInterBrokerReplicaTasks =
           new ArrayList<>(_executionTaskManager.inExecutionTasks(Collections.singleton(INTER_BROKER_REPLICA_ACTION)));
+      Cluster cluster = _metadataClient.cluster();
+      if (activeInterBrokerReplicaTasks.stream().anyMatch(task -> cluster.partition(task.proposal().topicPartition()) == null)) {
+        // Metadata can change after the progress poll. Let the next poll handle deletion before retrying
+        // or validating reservations, instead of checking completion with a missing partition.
+        LOG.debug("User task {}: Deferring inter-broker retries until missing partitions are handled by the next progress poll.", _uuid);
+        return;
+      }
+      List<ExecutionTask> candidateInterBrokerReplicaTasksToReexecute =
+          activeInterBrokerReplicaTasks.stream()
+              // Replica membership may be complete while a disk copy or its confirmation query is still pending.
+              .filter(task -> !ExecutionUtils.isInterBrokerReplicaActionDone(cluster, task))
+              .collect(Collectors.toList());
       List<ExecutionTask> tasksToReexecute;
       try {
         tasksToReexecute = ExecutionUtils.getInterBrokerReplicaTasksToReexecute(ExecutionUtils.partitionsBeingReassigned(_adminClient),
@@ -2329,7 +2554,8 @@ public class Executor {
         AlterPartitionReassignmentsResult result;
         try {
           result = ExecutionUtils.submitReplicaReassignmentTasks(_adminClient, tasksToReexecute,
-              candidateInterBrokerReplicaTasksToReexecute,
+              // Copies awaiting disk-placement confirmation still reserve capacity even when not resubmitted.
+              activeInterBrokerReplicaTasks,
               _config.getDouble(AnalyzerConfig.DISK_CAPACITY_THRESHOLD_CONFIG),
               _config.getLong(ExecutorConfig.LOGDIR_RESPONSE_TIMEOUT_MS_CONFIG));
         } catch (InterBrokerDiskCapacityValidator.ValidationException e) {
@@ -2369,14 +2595,15 @@ public class Executor {
       // Tasks with positive evidence of completion or in-progress do not need re-execution.
       logDirInfo.forEach((k, v) -> {
         String targetLogdir = k.proposal().replicasToMoveBetweenDisksByBroker().get(k.brokerId()).logdir();
-        if (targetLogdir.equals(v.getCurrentReplicaLogDir()) || targetLogdir.equals(v.getFutureReplicaLogDir())) {
+        // A redirected future copy is still active and must keep its throttle until it settles.
+        if (targetLogdir.equals(v.getCurrentReplicaLogDir()) || v.getFutureReplicaLogDir() != null) {
           intraBrokerReplicaTasksToReexecute.remove(k);
         }
       });
       if (!intraBrokerReplicaTasksToReexecute.isEmpty()) {
         if (_stopSignal.get() != NO_STOP_EXECUTION) {
           // Only mark tasks dead if we have positive evidence they are cancelled (logdir info was
-          // successfully retrieved but shows no current/future match). Tasks for which logdir info
+          // successfully retrieved, shows no future copy and does not match the target). Tasks for which logdir info
           // could not be retrieved (transient errors) are left in-progress so the outer loop keeps
           // polling until their state can be determined.
           List<ExecutionTask> confirmedCancelled = new ArrayList<>();
@@ -2403,6 +2630,10 @@ public class Executor {
             LOG.debug("User task {}: Unknown state tasks: {}", _uuid, unknownState);
           }
         } else {
+          intraBrokerReplicaTasksToReexecute.removeIf(task -> !logDirInfo.containsKey(task));
+          if (intraBrokerReplicaTasksToReexecute.isEmpty()) {
+            return;
+          }
           LOG.info("User task {}: Reexecuting tasks {}", _uuid, intraBrokerReplicaTasksToReexecute);
           try {
             executeIntraBrokerReplicaMovements(intraBrokerReplicaTasksToReexecute, inExecutionTasks(),

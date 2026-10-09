@@ -31,6 +31,7 @@ import java.util.concurrent.PriorityBlockingQueue;
 import java.util.concurrent.ScheduledExecutorService;
 import org.easymock.EasyMock;
 import org.junit.Test;
+import org.apache.kafka.common.utils.Time;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
@@ -92,6 +93,33 @@ public class AnomalyPluginCompatibilityTest {
     } finally {
       manager.shutdown();
     }
+  }
+
+  @Test
+  public void testUnfixableGoalContributionsAndGaugesAreIndependent() {
+    MetricRegistry registry = new MetricRegistry();
+    AnomalyDetectorState state = new AnomalyDetectorState(Time.SYSTEM, EasyMock.niceMock(AnomalyNotifier.class), 10, registry);
+    GoalViolations inter = EasyMock.mock(GoalViolations.class);
+    IntraBrokerGoalViolations intra = EasyMock.mock(IntraBrokerGoalViolations.class);
+    EasyMock.expect(inter.violatedGoalsByFixability()).andReturn(Map.of(false, List.of("RackAwareGoal")));
+    EasyMock.expect(intra.violatedGoalsByFixability()).andReturn(Map.of(true, List.of("IntraBrokerDiskUsageDistributionGoal")));
+    EasyMock.expect(intra.violatedGoalsByFixability()).andReturn(Map.of(false, List.of("IntraBrokerDiskCapacityGoal")));
+    EasyMock.expect(inter.violatedGoalsByFixability()).andReturn(Map.of(true, List.of("DiskUsageDistributionGoal")));
+    EasyMock.replay(inter, intra);
+    state.refreshHasUnfixableGoal(inter);
+    state.refreshHasUnfixableGoal(intra);
+    assertTrue(state.hasUnfixableGoals());
+    assertEquals(1, registry.getGauges().get("AnomalyDetector.GOAL_VIOLATION-has-unfixable-goals").getValue());
+    assertEquals(0, registry.getGauges().get("AnomalyDetector.INTRA_BROKER_GOAL_VIOLATION-has-unfixable-goals").getValue());
+    state.refreshHasUnfixableGoal(intra);
+    state.refreshHasUnfixableGoal(inter);
+    assertTrue(state.hasUnfixableGoals());
+    assertEquals(0, registry.getGauges().get("AnomalyDetector.GOAL_VIOLATION-has-unfixable-goals").getValue());
+    assertEquals(1, registry.getGauges().get("AnomalyDetector.INTRA_BROKER_GOAL_VIOLATION-has-unfixable-goals").getValue());
+    state.resetHasUnfixableGoals();
+    assertFalse(state.hasUnfixableGoals());
+    assertEquals(0, registry.getGauges().get("AnomalyDetector.INTRA_BROKER_GOAL_VIOLATION-has-unfixable-goals").getValue());
+    EasyMock.verify(inter, intra);
   }
 
   private static void setField(Object target, String name, Object value) throws Exception {

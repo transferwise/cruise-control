@@ -452,6 +452,8 @@ project(':cruise-control') {
   }
 
   task generateOpenApiJson(type: org.openapitools.generator.gradle.plugin.tasks.GenerateTask) {
+    // Referenced endpoint and response schemas must also invalidate the generated API specification.
+    inputs.dir("$rootDir/cruise-control/src/main/resources/yaml")
     inputSpec = "$rootDir/cruise-control/src/main/resources/yaml/base.yaml"
     generatorName = "openapi"
     outputDir = "$rootDir/cruise-control/src/main/resources/webroot"

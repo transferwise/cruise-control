@@ -2,20 +2,6 @@
  * Copyright 2017 LinkedIn Corp. Licensed under the BSD 2-Clause License (the "License"). See License in the project root for license information.
  */
 
-/*
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
-
 package com.linkedin.kafka.cruisecontrol.detector;
 
 import com.codahale.metrics.Meter;
@@ -30,13 +16,11 @@ import com.linkedin.kafka.cruisecontrol.KafkaCruiseControl;
 import com.linkedin.kafka.cruisecontrol.analyzer.OptimizationOptionsGenerator;
 import com.linkedin.kafka.cruisecontrol.analyzer.ProvisionStatus;
 import com.linkedin.kafka.cruisecontrol.async.progress.OperationProgress;
-import com.linkedin.kafka.cruisecontrol.config.BrokerCapacityConfigResolver;
 import com.linkedin.kafka.cruisecontrol.config.KafkaCruiseControlConfig;
 import com.linkedin.kafka.cruisecontrol.analyzer.AnalyzerUtils;
 import com.linkedin.kafka.cruisecontrol.analyzer.goals.Goal;
 import com.linkedin.kafka.cruisecontrol.config.constants.AnalyzerConfig;
 import com.linkedin.kafka.cruisecontrol.config.constants.AnomalyDetectorConfig;
-import com.linkedin.kafka.cruisecontrol.config.constants.MonitorConfig;
 import com.linkedin.kafka.cruisecontrol.exception.KafkaCruiseControlException;
 import com.linkedin.kafka.cruisecontrol.exception.OptimizationFailureException;
 import com.linkedin.kafka.cruisecontrol.executor.ExecutorState;
@@ -44,8 +28,11 @@ import com.linkedin.kafka.cruisecontrol.model.ClusterModel;
 import com.linkedin.kafka.cruisecontrol.model.ReplicaPlacementInfo;
 import com.linkedin.kafka.cruisecontrol.monitor.ModelGeneration;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.LinkedHashSet;
+import java.util.LinkedHashMap;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Queue;
@@ -76,14 +63,27 @@ public class GoalViolationDetector extends AbstractAnomalyDetector implements Ru
   private final List<Goal> _detectionGoals;
   private final List<Goal> _intraBrokerDetectionGoals;
   private ModelGeneration _lastCheckedModelGeneration;
+  private ModelGeneration _lastCheckedIntraBrokerModelGeneration;
+  private ModelGeneration _lastPublishedInterBrokerModelGeneration;
+  private ModelGeneration _lastPublishedIntraBrokerModelGeneration;
+  private boolean _isJbodCluster;
+  private boolean _interBrokerHasOfflineReplicas;
+  private boolean _intraBrokerHasOfflineReplicas;
+  private ProvisionResponse _interBrokerProvisionResponse = new ProvisionResponse(ProvisionStatus.UNDECIDED);
+  private ProvisionResponse _intraBrokerProvisionResponse = new ProvisionResponse(ProvisionStatus.UNDECIDED);
+  private boolean _interBrokerHasExcessiveReplicationFactor;
+  private boolean _intraBrokerHasExcessiveReplicationFactor;
+  private final Map<String, Integer> _violatedGoalCounts = new HashMap<>();
   private final Pattern _excludedTopics;
   private final boolean _allowCapacityEstimation;
   private final boolean _excludeRecentlyDemotedBrokers;
   private final boolean _excludeRecentlyRemovedBrokers;
   private final Map<String, Double> _balancednessCostByGoal;
-  private volatile double _balancednessScore;
-  private volatile ProvisionResponse _provisionResponse;
-  private volatile boolean _hasPartitionsWithRFGreaterThanNumRacks;
+  private final Map<String, Double> _interBrokerBalancednessCostByGoal;
+  // Published as a single atomic reference so concurrent readers (metrics gauges, REST handlers) never observe
+  // a torn combination of score/provisionResponse/hasExcessiveRF from an in-progress update.
+  private volatile DetectionSnapshot _detectionSnapshot =
+      new DetectionSnapshot(MAX_BALANCEDNESS_SCORE, new ProvisionResponse(ProvisionStatus.UNDECIDED), false);
   private final OptimizationOptionsGenerator _optimizationOptionsGenerator;
   private final Timer _goalViolationDetectionTimer;
   private final Timer _intraBrokerGoalViolationDetectionTimer;
@@ -91,9 +91,20 @@ public class GoalViolationDetector extends AbstractAnomalyDetector implements Ru
   protected static final double BALANCEDNESS_SCORE_WITH_OFFLINE_REPLICAS = -1.0;
   protected final Provisioner _provisioner;
   protected final Boolean _isProvisionerEnabled;
-  private final BrokerCapacityConfigResolver _brokerCapacityConfigResolver;
   private Map<Boolean, List<String>> _interBrokerViolations = Collections.emptyMap();
   private Map<Boolean, List<String>> _intraBrokerViolations = Collections.emptyMap();
+
+  private static final class DetectionSnapshot {
+    private final double _balancednessScore;
+    private final ProvisionResponse _provisionResponse;
+    private final boolean _hasPartitionsWithRFGreaterThanNumRacks;
+
+    private DetectionSnapshot(double balancednessScore, ProvisionResponse provisionResponse, boolean hasPartitionsWithRFGreaterThanNumRacks) {
+      _balancednessScore = balancednessScore;
+      _provisionResponse = provisionResponse;
+      _hasPartitionsWithRFGreaterThanNumRacks = hasPartitionsWithRFGreaterThanNumRacks;
+    }
+  }
 
   public GoalViolationDetector(Queue<Anomaly> anomalies, KafkaCruiseControl kafkaCruiseControl, MetricRegistry dropwizardMetricRegistry) {
     super(anomalies, kafkaCruiseControl);
@@ -105,16 +116,18 @@ public class GoalViolationDetector extends AbstractAnomalyDetector implements Ru
     _allowCapacityEstimation = config.getBoolean(AnomalyDetectorConfig.ANOMALY_DETECTION_ALLOW_CAPACITY_ESTIMATION_CONFIG);
     _excludeRecentlyDemotedBrokers = config.getBoolean(AnomalyDetectorConfig.SELF_HEALING_EXCLUDE_RECENTLY_DEMOTED_BROKERS_CONFIG);
     _excludeRecentlyRemovedBrokers = config.getBoolean(AnomalyDetectorConfig.SELF_HEALING_EXCLUDE_RECENTLY_REMOVED_BROKERS_CONFIG);
-    // Combine both inter-broker and intra-broker goals for balancedness calculation
-    List<Goal> allDetectionGoals = new ArrayList<>();
-    allDetectionGoals.addAll(_detectionGoals);
-    allDetectionGoals.addAll(_intraBrokerDetectionGoals);
-    _balancednessCostByGoal = balancednessCostByGoal(allDetectionGoals,
-                                                     config.getDouble(AnalyzerConfig.GOAL_BALANCEDNESS_PRIORITY_WEIGHT_CONFIG),
-                                                     config.getDouble(AnalyzerConfig.GOAL_BALANCEDNESS_STRICTNESS_WEIGHT_CONFIG));
-    _balancednessScore = MAX_BALANCEDNESS_SCORE;
-    _provisionResponse = new ProvisionResponse(ProvisionStatus.UNDECIDED);
-    _hasPartitionsWithRFGreaterThanNumRacks = false;
+    // A goal shared by both passes contributes once, at its first configured priority.
+    Map<String, Goal> allDetectionGoals = new LinkedHashMap<>();
+    _detectionGoals.forEach(goal -> allDetectionGoals.putIfAbsent(goal.name(), goal));
+    _intraBrokerDetectionGoals.forEach(goal -> allDetectionGoals.putIfAbsent(goal.name(), goal));
+    _balancednessCostByGoal = allDetectionGoals.isEmpty() ? Collections.emptyMap()
+        : balancednessCostByGoal(new ArrayList<>(allDetectionGoals.values()),
+                                 config.getDouble(AnalyzerConfig.GOAL_BALANCEDNESS_PRIORITY_WEIGHT_CONFIG),
+                                 config.getDouble(AnalyzerConfig.GOAL_BALANCEDNESS_STRICTNESS_WEIGHT_CONFIG));
+    _interBrokerBalancednessCostByGoal = _detectionGoals.isEmpty() ? Collections.emptyMap()
+        : balancednessCostByGoal(_detectionGoals,
+                                 config.getDouble(AnalyzerConfig.GOAL_BALANCEDNESS_PRIORITY_WEIGHT_CONFIG),
+                                 config.getDouble(AnalyzerConfig.GOAL_BALANCEDNESS_STRICTNESS_WEIGHT_CONFIG));
     Map<String, Object> overrideConfigs = Map.of(KAFKA_CRUISE_CONTROL_CONFIG_OBJECT_CONFIG, config,
                                                  ADMIN_CLIENT_CONFIG, _kafkaCruiseControl.adminClient());
     _optimizationOptionsGenerator = config.getConfiguredInstance(AnalyzerConfig.OPTIMIZATION_OPTIONS_GENERATOR_CLASS_CONFIG,
@@ -127,23 +140,20 @@ public class GoalViolationDetector extends AbstractAnomalyDetector implements Ru
     _automatedRightsizingMeter = dropwizardMetricRegistry.meter(MetricRegistry.name(ANOMALY_DETECTOR_SENSOR, "automated-rightsizing-rate"));
     _provisioner = kafkaCruiseControl.provisioner();
     _isProvisionerEnabled = config.getBoolean(AnomalyDetectorConfig.PROVISIONER_ENABLE_CONFIG);
-    _brokerCapacityConfigResolver = config.getConfiguredInstance(
-            MonitorConfig.BROKER_CAPACITY_CONFIG_RESOLVER_CLASS_CONFIG,
-            BrokerCapacityConfigResolver.class);
   }
 
   /**
    * @return A metric to quantify how well the load distribution on a cluster satisfies the {@link #_detectionGoals}.
    */
   public double balancednessScore() {
-    return _balancednessScore;
+    return _detectionSnapshot._balancednessScore;
   }
 
   /**
    * @return Provision status of the cluster based on the latest goal violation check.
    */
   public ProvisionStatus provisionStatus() {
-    return _provisionResponse.status();
+    return _detectionSnapshot._provisionResponse.status();
   }
 
   /**
@@ -151,7 +161,7 @@ public class GoalViolationDetector extends AbstractAnomalyDetector implements Ru
    * racks that contain brokers that are eligible to host replicas (i.e. not excluded for replica moves), {@code false} otherwise.
    */
   public boolean hasPartitionsWithRFGreaterThanNumRacks() {
-    return _hasPartitionsWithRFGreaterThanNumRacks;
+    return _detectionSnapshot._hasPartitionsWithRFGreaterThanNumRacks;
   }
 
   /**
@@ -168,7 +178,9 @@ public class GoalViolationDetector extends AbstractAnomalyDetector implements Ru
    * @return The {@link AnomalyDetectionStatus anomaly detection status}, indicating whether the anomaly detector is ready.
    */
   protected AnomalyDetectionStatus getGoalViolationDetectionStatus() {
-    if (_kafkaCruiseControl.loadMonitor().clusterModelGeneration().equals(_lastCheckedModelGeneration)) {
+    ModelGeneration generation = _kafkaCruiseControl.loadMonitor().clusterModelGeneration();
+    if (!_interBrokerHasOfflineReplicas && generation.equals(_lastCheckedModelGeneration)
+        && (!_isJbodCluster || generation.equals(_lastCheckedIntraBrokerModelGeneration))) {
       if (LOG.isDebugEnabled()) {
         LOG.debug("Skipping goal violation detection because the model generation hasn't changed. Current model generation {}",
                   _kafkaCruiseControl.loadMonitor().clusterModelGeneration());
@@ -181,9 +193,14 @@ public class GoalViolationDetector extends AbstractAnomalyDetector implements Ru
       setBalancednessWithOfflineReplicas();
     } else if (detectionStatus == AnomalyDetectionStatus.SKIP_EXECUTOR_NOT_READY) {
       // An ongoing execution might indicate a cluster expansion/shrinking. Hence, the detector avoids reporting a stale provision status.
-      _provisionResponse = new ProvisionResponse(ProvisionStatus.UNDECIDED);
-      // An ongoing execution may modify the replication factor of partitions; hence, the detector avoids reporting potential false positives.
-      _hasPartitionsWithRFGreaterThanNumRacks = false;
+      _interBrokerProvisionResponse = new ProvisionResponse(ProvisionStatus.UNDECIDED);
+      _intraBrokerProvisionResponse = new ProvisionResponse(ProvisionStatus.UNDECIDED);
+      _interBrokerHasExcessiveReplicationFactor = false;
+      _intraBrokerHasExcessiveReplicationFactor = false;
+      // An ongoing execution may modify the replication factor of partitions; hence, the detector avoids reporting potential
+      // false positives for provisioning status and RF-vs-rack-count violations, while leaving the score untouched.
+      _detectionSnapshot = new DetectionSnapshot(_detectionSnapshot._balancednessScore,
+                                                 new ProvisionResponse(ProvisionStatus.UNDECIDED), false);
     }
 
     return detectionStatus;
@@ -191,16 +208,38 @@ public class GoalViolationDetector extends AbstractAnomalyDetector implements Ru
 
   @Override
   public void run() {
+    boolean previouslyJbod = _isJbodCluster;
+    boolean jbodStateKnown = true;
+    try {
+      // The manager is constructed before the monitor; resolve this at run time and use the model's resolver.
+      _isJbodCluster = _kafkaCruiseControl.loadMonitor().isJbodKafkaCluster();
+    } catch (RuntimeException e) {
+      LOG.warn("Skipping intra-broker goal violation detection because the capacity resolver could not determine JBOD state.", e);
+      jbodStateKnown = false;
+    }
+    if (jbodStateKnown && _isJbodCluster && !previouslyJbod && !hasOfflineReplicas()) {
+      refreshBalancednessScore(_violatedGoalCounts.keySet());
+    }
+    if (jbodStateKnown && !_isJbodCluster) {
+      clearIntraBrokerDetectionState();
+    }
     if (getGoalViolationDetectionStatus() != AnomalyDetectionStatus.READY) {
       return;
     }
-
-    // Run inter-broker goal violation detection
-    detectInterBrokerGoalViolations();
-
-    // Run intra-broker goal violation detection (only for JBOD clusters)
-    if (_brokerCapacityConfigResolver.isJbodKafkaCluster()) {
+    ModelGeneration generation = _kafkaCruiseControl.loadMonitor().clusterModelGeneration();
+    if (_interBrokerHasOfflineReplicas || !generation.equals(_lastCheckedModelGeneration)) {
+      detectInterBrokerGoalViolations();
+      if (_detectionGoals.isEmpty() && !_interBrokerHasOfflineReplicas) {
+        _lastCheckedModelGeneration = generation;
+      }
+    }
+    // An intra-broker result cannot certify inter-broker health. Retry an incomplete pass independently.
+    if (jbodStateKnown && _isJbodCluster && !_interBrokerHasOfflineReplicas
+        && !generation.equals(_lastCheckedIntraBrokerModelGeneration)) {
       detectIntraBrokerGoalViolations();
+      if (_intraBrokerDetectionGoals.isEmpty()) {
+        _lastCheckedIntraBrokerModelGeneration = generation;
+      }
     }
   }
 
@@ -209,6 +248,9 @@ public class GoalViolationDetector extends AbstractAnomalyDetector implements Ru
    */
   private void detectInterBrokerGoalViolations() {
     AutoCloseable clusterModelSemaphore = null;
+    boolean previousExcessiveReplicationFactor = _interBrokerHasExcessiveReplicationFactor;
+    boolean resultPublished = false;
+    _interBrokerHasExcessiveReplicationFactor = false;
     try {
       Map<String, Object> parameterConfigOverrides = Map.of(KAFKA_CRUISE_CONTROL_OBJECT_CONFIG, _kafkaCruiseControl,
                                                             ANOMALY_DETECTION_TIME_MS_OBJECT_CONFIG, _kafkaCruiseControl.timeMs());
@@ -216,6 +258,8 @@ public class GoalViolationDetector extends AbstractAnomalyDetector implements Ru
                                                                                          GoalViolations.class,
                                                                                          parameterConfigOverrides);
       boolean newModelNeeded = true;
+      boolean allGoalsChecked = true;
+      ModelGeneration checkedGeneration = null;
       ClusterModel clusterModel = null;
 
       // Retrieve excluded brokers for leadership and replica move.
@@ -254,36 +298,50 @@ public class GoalViolationDetector extends AbstractAnomalyDetector implements Ru
               if (skipDueToOfflineReplicas(clusterModel)) {
                 return;
               }
-              _lastCheckedModelGeneration = clusterModel.generation();
+              checkedGeneration = clusterModel.generation();
             }
             newModelNeeded = optimizeForGoal(clusterModel, goal, goalViolations, excludedBrokersForLeadership, excludedBrokersForReplicaMove,
-                                             checkPartitionsWithRFGreaterThanNumRacks, false);
+                                             checkPartitionsWithRFGreaterThanNumRacks);
             // CC will check for partitions with RF greater than number of eligible racks just once, because regardless of the goal, the cluster
             // will have the same (1) maximum replication factor and (2) rack count containing brokers that are eligible to host replicas.
             checkPartitionsWithRFGreaterThanNumRacks = false;
+            provisionResponse.aggregate(goal.provisionResponse());
           } else {
+            allGoalsChecked = false;
             LOG.warn("Skipping goal violation detection for {} because load completeness requirement is not met.", goal);
           }
-          provisionResponse.aggregate(goal.provisionResponse());
         }
       } finally {
         ctx.stop();
       }
-      _provisionResponse = provisionResponse;
-      if (_isProvisionerEnabled) {
-        // Rightsize the cluster (if needed)
-        ProvisionerState provisionerState = _provisioner.rightsize(_provisionResponse.recommendationByRecommender(), new RightsizeOptions());
+      Map<Boolean, List<String>> violatedGoalsByFixability = goalViolations.violatedGoalsByFixability();
+      if (checkedGeneration == null && !_detectionGoals.isEmpty()) {
+        // No goal was checked. Keep the last observed state and retry this generation next time.
+        return;
+      }
+      boolean newResult = isNewDetectionResult(checkedGeneration, violatedGoalsByFixability, provisionResponse, false);
+      if (newResult && !violatedGoalsByFixability.isEmpty()) {
+        goalViolations.setProvisionResponse(provisionResponse);
+        _anomalies.add(goalViolations);
+      }
+      _interBrokerProvisionResponse = provisionResponse;
+      _interBrokerHasOfflineReplicas = false;
+      refreshCombinedBalancednessScore(violatedGoalsByFixability, false);
+      publishDetectionState();
+      _lastPublishedInterBrokerModelGeneration = checkedGeneration;
+      resultPublished = true;
+      if (allGoalsChecked && checkedGeneration != null) {
+        _lastCheckedModelGeneration = checkedGeneration;
+      }
+      if (_isProvisionerEnabled && newResult) {
+        // Rightsize the cluster (if needed). Run after publishing detection state so that a rightsize failure
+        // cannot leave the detector serving stale provisioning/balancedness state for this cycle.
+        ProvisionerState provisionerState = _provisioner.rightsize(provisionResponse.recommendationByRecommender(), new RightsizeOptions());
         if (provisionerState != null) {
           LOG.info("Provisioner state: {}.", provisionerState);
           _automatedRightsizingMeter.mark();
         }
       }
-      Map<Boolean, List<String>> violatedGoalsByFixability = goalViolations.violatedGoalsByFixability();
-      if (!violatedGoalsByFixability.isEmpty()) {
-        goalViolations.setProvisionResponse(_provisionResponse);
-        _anomalies.add(goalViolations);
-      }
-      refreshCombinedBalancednessScore(violatedGoalsByFixability, false);
     } catch (NotEnoughValidWindowsException nevwe) {
       LOG.debug("Skipping goal violation detection because there are not enough valid windows.", nevwe);
     } catch (KafkaCruiseControlException kcce) {
@@ -291,6 +349,9 @@ public class GoalViolationDetector extends AbstractAnomalyDetector implements Ru
     } catch (Exception e) {
       LOG.error("Unexpected exception", e);
     } finally {
+      if (!resultPublished) {
+        _interBrokerHasExcessiveReplicationFactor = previousExcessiveReplicationFactor;
+      }
       if (clusterModelSemaphore != null) {
         try {
           clusterModelSemaphore.close();
@@ -307,6 +368,9 @@ public class GoalViolationDetector extends AbstractAnomalyDetector implements Ru
    */
   private void detectIntraBrokerGoalViolations() {
     AutoCloseable clusterModelSemaphore = null;
+    boolean previousExcessiveReplicationFactor = _intraBrokerHasExcessiveReplicationFactor;
+    boolean resultPublished = false;
+    _intraBrokerHasExcessiveReplicationFactor = false;
     try {
       Map<String, Object> parameterConfigOverrides = Map.of(KAFKA_CRUISE_CONTROL_OBJECT_CONFIG, _kafkaCruiseControl,
                                                             ANOMALY_DETECTION_TIME_MS_OBJECT_CONFIG, _kafkaCruiseControl.timeMs());
@@ -316,6 +380,8 @@ public class GoalViolationDetector extends AbstractAnomalyDetector implements Ru
               parameterConfigOverrides);
 
       boolean newModelNeeded = true;
+      boolean allGoalsChecked = true;
+      ModelGeneration checkedGeneration = null;
       ClusterModel clusterModel = null;
 
       // Retrieve excluded brokers for leadership and replica move.
@@ -352,10 +418,15 @@ public class GoalViolationDetector extends AbstractAnomalyDetector implements Ru
 
               // If the clusterModel contains dead brokers or disks, goal violation detector will ignore any goal violations.
               // Detection and fix for dead brokers/disks is the responsibility of broker/disk failure detector.
-              if (skipDueToOfflineReplicas(clusterModel)) {
+              if (skipDueToOfflineReplicas(clusterModel, false)) {
+                // Cache the generation we just checked (instead of clearing to null) so that, as long as the
+                // model generation does not advance, the top-level status check can skip re-detection entirely
+                // instead of rebuilding the cluster model on every tick while the offline condition persists.
+                clearIntraBrokerDetectionState(clusterModel.generation(), true);
+                resultPublished = true;
                 return;
               }
-              _lastCheckedModelGeneration = clusterModel.generation();
+              checkedGeneration = clusterModel.generation();
             }
             newModelNeeded = optimizeForGoal(clusterModel, goal, goalViolations, excludedBrokersForLeadership,
                                              excludedBrokersForReplicaMove, checkPartitionsWithRFGreaterThanNumRacks, true);
@@ -364,29 +435,42 @@ public class GoalViolationDetector extends AbstractAnomalyDetector implements Ru
             // (1) maximum replication factor and
             // (2) rack count containing brokers that are eligible to host replicas.
             checkPartitionsWithRFGreaterThanNumRacks = false;
+            provisionResponse.aggregate(goal.provisionResponse());
           } else {
+            allGoalsChecked = false;
             LOG.warn("Skipping goal violation detection for {} because load completeness requirement is not met.", goal);
           }
-          provisionResponse.aggregate(goal.provisionResponse());
         }
       } finally {
         ctx.stop();
       }
-      _provisionResponse.aggregate(provisionResponse);
-      if (_isProvisionerEnabled) {
-        // Rightsize the cluster (if needed)
+      Map<Boolean, List<String>> violatedGoalsByFixability = goalViolations.violatedGoalsByFixability();
+      if (checkedGeneration == null && !_intraBrokerDetectionGoals.isEmpty()) {
+        return;
+      }
+      boolean newResult = isNewDetectionResult(checkedGeneration, violatedGoalsByFixability, provisionResponse, true);
+      if (newResult && !violatedGoalsByFixability.isEmpty()) {
+        goalViolations.setProvisionResponse(provisionResponse);
+        _anomalies.add(goalViolations);
+      }
+      _intraBrokerProvisionResponse = provisionResponse;
+      _intraBrokerHasOfflineReplicas = false;
+      refreshCombinedBalancednessScore(violatedGoalsByFixability, true);
+      publishDetectionState();
+      _lastPublishedIntraBrokerModelGeneration = checkedGeneration;
+      resultPublished = true;
+      if (allGoalsChecked && checkedGeneration != null) {
+        _lastCheckedIntraBrokerModelGeneration = checkedGeneration;
+      }
+      if (_isProvisionerEnabled && newResult) {
+        // Rightsize the cluster (if needed). Run after publishing detection state so that a rightsize failure
+        // cannot leave the detector serving stale provisioning/balancedness state for this cycle.
         ProvisionerState provisionerState = _provisioner.rightsize(provisionResponse.recommendationByRecommender(), new RightsizeOptions());
         if (provisionerState != null) {
           LOG.info("Provisioner state: {}.", provisionerState);
           _automatedRightsizingMeter.mark();
         }
       }
-      Map<Boolean, List<String>> violatedGoalsByFixability = goalViolations.violatedGoalsByFixability();
-      if (!violatedGoalsByFixability.isEmpty()) {
-        goalViolations.setProvisionResponse(provisionResponse);
-        _anomalies.add(goalViolations);
-      }
-      refreshCombinedBalancednessScore(violatedGoalsByFixability, true);
     } catch (NotEnoughValidWindowsException nevwe) {
       LOG.debug("Skipping intra-broker goal violation detection because there are not enough valid windows.", nevwe);
     } catch (KafkaCruiseControlException kcce) {
@@ -394,6 +478,9 @@ public class GoalViolationDetector extends AbstractAnomalyDetector implements Ru
     } catch (Exception e) {
       LOG.error("Unexpected exception in intra-broker goal violation detection", e);
     } finally {
+      if (!resultPublished) {
+        _intraBrokerHasExcessiveReplicationFactor = previousExcessiveReplicationFactor;
+      }
       if (clusterModelSemaphore != null) {
         try {
           clusterModelSemaphore.close();
@@ -410,15 +497,23 @@ public class GoalViolationDetector extends AbstractAnomalyDetector implements Ru
    * @return {@code true} to skip goal violation detection due to offline replicas in the cluster model.
    */
   protected boolean skipDueToOfflineReplicas(ClusterModel clusterModel) {
+    return skipDueToOfflineReplicas(clusterModel, true);
+  }
+
+  private boolean skipDueToOfflineReplicas(ClusterModel clusterModel, boolean resetInterBrokerState) {
     if (!clusterModel.deadBrokers().isEmpty()) {
       LOG.info("Skipping goal violation detection due to dead brokers {}, which are reported by broker failure "
                + "detector, and fixed if its self healing configuration is enabled.", clusterModel.deadBrokers());
-      setBalancednessWithOfflineReplicas();
+      if (resetInterBrokerState) {
+        setBalancednessWithOfflineReplicas();
+      }
       return true;
     } else if (!clusterModel.brokersWithBadDisks().isEmpty()) {
       LOG.info("Skipping goal violation detection due to brokers with bad disks {}, which are reported by disk failure "
                + "detector, and fixed if its self healing configuration is enabled.", clusterModel.brokersWithBadDisks());
-      setBalancednessWithOfflineReplicas();
+      if (resetInterBrokerState) {
+        setBalancednessWithOfflineReplicas();
+      }
       return true;
     }
 
@@ -426,28 +521,107 @@ public class GoalViolationDetector extends AbstractAnomalyDetector implements Ru
   }
 
   protected void setBalancednessWithOfflineReplicas() {
-    _balancednessScore = BALANCEDNESS_SCORE_WITH_OFFLINE_REPLICAS;
-    _provisionResponse = new ProvisionResponse(ProvisionStatus.UNDECIDED);
+    _interBrokerHasOfflineReplicas = true;
+    _detectionSnapshot = new DetectionSnapshot(BALANCEDNESS_SCORE_WITH_OFFLINE_REPLICAS,
+                                               new ProvisionResponse(ProvisionStatus.UNDECIDED), false);
+  }
+
+  private void clearIntraBrokerDetectionState() {
+    clearIntraBrokerDetectionState(null, false);
+  }
+
+  /**
+   * @param checkedGeneration The model generation that was just found to still have offline replicas, cached so that
+   *                           the top-level status check can skip re-detection until the generation actually advances;
+   *                           {@code null} when no specific generation was checked (e.g. on a JBOD-to-non-JBOD transition).
+   * @param offlineReplicas whether the disk-populated model found offline replicas
+   */
+  private void clearIntraBrokerDetectionState(ModelGeneration checkedGeneration, boolean offlineReplicas) {
+    _intraBrokerHasOfflineReplicas = offlineReplicas;
+    _intraBrokerProvisionResponse = new ProvisionResponse(ProvisionStatus.UNDECIDED);
+    _intraBrokerHasExcessiveReplicationFactor = false;
+    _lastCheckedIntraBrokerModelGeneration = checkedGeneration;
+    refreshCombinedBalancednessScore(Collections.emptyMap(), true);
+    publishDetectionState();
+  }
+
+  private void publishDetectionState() {
+    if (hasOfflineReplicas()) {
+      _detectionSnapshot = new DetectionSnapshot(BALANCEDNESS_SCORE_WITH_OFFLINE_REPLICAS,
+                                                 new ProvisionResponse(ProvisionStatus.UNDECIDED), false);
+    } else {
+      // Publish a fresh aggregate in one atomic snapshot; anomaly objects retain their own pass's response unchanged.
+      ProvisionResponse combined = new ProvisionResponse(ProvisionStatus.UNDECIDED)
+          .aggregate(_interBrokerProvisionResponse).aggregate(_intraBrokerProvisionResponse);
+      boolean hasExcessiveRF = _interBrokerHasExcessiveReplicationFactor || _intraBrokerHasExcessiveReplicationFactor;
+      _detectionSnapshot = new DetectionSnapshot(_detectionSnapshot._balancednessScore, combined, hasExcessiveRF);
+    }
+  }
+
+  private boolean hasOfflineReplicas() {
+    return _interBrokerHasOfflineReplicas || _intraBrokerHasOfflineReplicas;
+  }
+
+  private boolean isNewDetectionResult(ModelGeneration generation, Map<Boolean, List<String>> violations,
+                                       ProvisionResponse provisionResponse, boolean intraBroker) {
+    ModelGeneration previousGeneration = intraBroker ? _lastPublishedIntraBrokerModelGeneration
+        : _lastPublishedInterBrokerModelGeneration;
+    Map<Boolean, List<String>> previousViolations = intraBroker ? _intraBrokerViolations : _interBrokerViolations;
+    ProvisionResponse previousProvision = intraBroker ? _intraBrokerProvisionResponse : _interBrokerProvisionResponse;
+    // Retry incomplete goals without repeatedly enqueuing the same anomaly or invoking the provisioner.
+    // A new generation or changed result remains eligible for publication.
+    return generation == null || !generation.equals(previousGeneration) || !violations.equals(previousViolations)
+        || provisionResponse.status() != previousProvision.status()
+        || !provisionResponse.recommendation().equals(previousProvision.recommendation());
   }
 
   protected void refreshCombinedBalancednessScore(Map<Boolean, List<String>> violations, boolean intraBroker) {
+    Map<Boolean, List<String>> previous = intraBroker ? _intraBrokerViolations : _interBrokerViolations;
+    Set<String> previousNames = new LinkedHashSet<>();
+    previous.values().forEach(previousNames::addAll);
+    previousNames.forEach(name -> {
+      if (_violatedGoalCounts.merge(name, -1, Integer::sum) == 0) {
+        _violatedGoalCounts.remove(name);
+      }
+    });
+    Map<Boolean, List<String>> snapshot = new HashMap<>();
+    violations.forEach((fixable, names) -> snapshot.put(fixable, List.copyOf(names)));
+    Set<String> names = new LinkedHashSet<>();
+    snapshot.values().forEach(names::addAll);
+    names.forEach(name -> _violatedGoalCounts.merge(name, 1, Integer::sum));
     if (intraBroker) {
-      _intraBrokerViolations = violations;
+      _intraBrokerViolations = snapshot;
     } else {
-      _interBrokerViolations = violations;
+      _interBrokerViolations = snapshot;
     }
-    Set<String> combined = new LinkedHashSet<>();
-    _interBrokerViolations.values().forEach(combined::addAll);
-    _intraBrokerViolations.values().forEach(combined::addAll);
-    // Balancedness depends on which goals are violated, regardless of whether the violations are fixable.
-    refreshBalancednessScore(Collections.singletonMap(true, new ArrayList<>(combined)));
+    if (!hasOfflineReplicas()) {
+      refreshBalancednessScore(_violatedGoalCounts.keySet());
+    }
   }
 
+  /**
+   * Compatibility overload for existing detector subclasses. Fixability does not affect the score.
+   * @param violatedGoalsByFixability violated goal names grouped by fixability
+   */
   protected void refreshBalancednessScore(Map<Boolean, List<String>> violatedGoalsByFixability) {
-    _balancednessScore = MAX_BALANCEDNESS_SCORE;
-    for (List<String> violatedGoals : violatedGoalsByFixability.values()) {
-      violatedGoals.forEach(violatedGoal -> _balancednessScore -= _balancednessCostByGoal.get(violatedGoal));
+    Set<String> violatedGoals = new LinkedHashSet<>();
+    violatedGoalsByFixability.values().forEach(violatedGoals::addAll);
+    refreshBalancednessScore(violatedGoals);
+  }
+
+  protected void refreshBalancednessScore(Collection<String> violatedGoals) {
+    // Explicit intra-broker names supplied through the protected compatibility API retain combined scoring.
+    Map<String, Double> costs = _isJbodCluster
+        || violatedGoals.stream().anyMatch(name -> !_interBrokerBalancednessCostByGoal.containsKey(name))
+        ? _balancednessCostByGoal : _interBrokerBalancednessCostByGoal;
+    double score = MAX_BALANCEDNESS_SCORE;
+    // A goal name absent from the cost map (e.g. a stale name from a subclass calling this compatibility API after
+    // a goal was renamed/removed from configuration) contributes no penalty instead of throwing an NPE.
+    for (String violatedGoal : violatedGoals) {
+      score -= costs.getOrDefault(violatedGoal, 0.0);
     }
+    _detectionSnapshot = new DetectionSnapshot(score, _detectionSnapshot._provisionResponse,
+                                               _detectionSnapshot._hasPartitionsWithRFGreaterThanNumRacks);
   }
 
   protected Set<String> excludedTopics(ClusterModel clusterModel) {
@@ -459,12 +633,10 @@ public class GoalViolationDetector extends AbstractAnomalyDetector implements Ru
                                     GoalViolations goalViolations,
                                     Set<Integer> excludedBrokersForLeadership,
                                     Set<Integer> excludedBrokersForReplicaMove,
-                                    boolean checkPartitionsWithRFGreaterThanNumRacks,
-                                    boolean isIntraBroker)
+                                    boolean checkPartitionsWithRFGreaterThanNumRacks)
       throws KafkaCruiseControlException {
     if (clusterModel.topics().isEmpty()) {
-      LOG.info("Skipping {} goal violation detection because the cluster model does not have any topic.",
-               isIntraBroker ? "intra-broker" : "inter-broker");
+      LOG.info("Skipping inter-broker goal violation detection because the cluster model does not have any topic.");
       return false;
     }
     Map<TopicPartition, List<ReplicaPlacementInfo>> initReplicaDistribution = clusterModel.getReplicaDistribution();
@@ -475,11 +647,8 @@ public class GoalViolationDetector extends AbstractAnomalyDetector implements Ru
                                                                                                                excludedBrokersForLeadership,
                                                                                                                excludedBrokersForReplicaMove);
       if (checkPartitionsWithRFGreaterThanNumRacks) {
-        if (isIntraBroker) {
-          _hasPartitionsWithRFGreaterThanNumRacks = clusterModel.maxReplicationFactor() > clusterModel.numAliveRacksAllowedReplicaMoves(options);
-        } else {
-          _hasPartitionsWithRFGreaterThanNumRacks = clusterModel.maxReplicationFactor() > clusterModel.aliveRacksAllowedReplicaMoves(options).size();
-        }
+        _interBrokerHasExcessiveReplicationFactor =
+            clusterModel.maxReplicationFactor() > clusterModel.aliveRacksAllowedReplicaMoves(options).size();
       }
       goal.optimize(clusterModel, Collections.emptySet(), options);
     } catch (OptimizationFailureException ofe) {
@@ -523,7 +692,7 @@ public class GoalViolationDetector extends AbstractAnomalyDetector implements Ru
                                                                                                                excludedBrokersForLeadership,
                                                                                                                excludedBrokersForReplicaMove);
       if (checkPartitionsWithRFGreaterThanNumRacks) {
-        _hasPartitionsWithRFGreaterThanNumRacks = clusterModel.maxReplicationFactor() > clusterModel.numAliveRacksAllowedReplicaMoves(options);
+        _intraBrokerHasExcessiveReplicationFactor = clusterModel.maxReplicationFactor() > clusterModel.numAliveRacksAllowedReplicaMoves(options);
       }
       goal.optimize(clusterModel, Collections.emptySet(), options);
     } catch (OptimizationFailureException ofe) {

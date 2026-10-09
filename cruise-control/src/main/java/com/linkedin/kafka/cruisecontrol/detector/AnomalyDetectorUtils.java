@@ -2,25 +2,12 @@
  * Copyright 2019 LinkedIn Corp. Licensed under the BSD 2-Clause License (the "License"). See License in the project root for license information.
  */
 
-/*
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
-
 package com.linkedin.kafka.cruisecontrol.detector;
 
 import com.linkedin.cruisecontrol.detector.Anomaly;
 import com.linkedin.kafka.cruisecontrol.KafkaCruiseControl;
 import com.linkedin.kafka.cruisecontrol.config.constants.AnomalyDetectorConfig;
+import com.linkedin.kafka.cruisecontrol.config.constants.AnalyzerConfig;
 import com.linkedin.kafka.cruisecontrol.config.constants.MonitorConfig;
 import com.linkedin.kafka.cruisecontrol.executor.ExecutorState;
 import com.linkedin.kafka.cruisecontrol.monitor.task.LoadMonitorTaskRunner;
@@ -90,7 +77,9 @@ public final class AnomalyDetectorUtils {
    * @return A list of names for intra broker goals from SELF_HEALING_INTRA_BROKER_GOALS_CONFIG in the order of priority.
    */
   public static List<String> getSelfHealingIntraBrokerGoalNames(KafkaCruiseControlConfig config) {
-    List<Goal> goals = config.getConfiguredInstances(AnomalyDetectorConfig.SELF_HEALING_INTRA_BROKER_GOALS_CONFIG, Goal.class);
+    String configKey = config.getList(AnomalyDetectorConfig.SELF_HEALING_INTRA_BROKER_GOALS_CONFIG).isEmpty()
+        ? AnalyzerConfig.INTRA_BROKER_GOALS_CONFIG : AnomalyDetectorConfig.SELF_HEALING_INTRA_BROKER_GOALS_CONFIG;
+    List<Goal> goals = config.getConfiguredInstances(configKey, Goal.class);
     List<String> selfHealingGoalNames = new ArrayList<>(goals.size());
     for (Goal goal : goals) {
       selfHealingGoalNames.add(goal.name());

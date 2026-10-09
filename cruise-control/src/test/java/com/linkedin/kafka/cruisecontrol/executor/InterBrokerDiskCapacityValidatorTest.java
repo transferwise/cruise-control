@@ -2,20 +2,6 @@
  * Copyright 2026 LinkedIn Corp. Licensed under the BSD 2-Clause License (the "License"). See License in the project root for license information.
  */
 
-/*
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
-
 package com.linkedin.kafka.cruisecontrol.executor;
 
 import com.linkedin.kafka.cruisecontrol.model.ReplicaPlacementInfo;
@@ -125,6 +111,22 @@ public class InterBrokerDiskCapacityValidatorTest {
     EasyMock.replay(admin, placement);
     assertThrows(IllegalStateException.class,
                  () -> ExecutionUtils.submitReplicaReassignmentTasks(admin, List.of(task(0, 20)), Set.of(), 0.8, 1000));
+    EasyMock.verify(admin, dirs, placement);
+  }
+
+  @Test
+  public void testTimedOutAcknowledgementPreventsReassignment() {
+    AdminClient admin = EasyMock.strictMock(AdminClient.class);
+    DescribeLogDirsResult dirs = expectDescriptions(admin, descriptions(600));
+    AlterReplicaLogDirsResult placement = EasyMock.mock(AlterReplicaLogDirsResult.class);
+    EasyMock.expect(admin.alterReplicaLogDirs(Map.of(DESTINATION, TARGET))).andReturn(placement);
+    // Never completes, so get(timeoutMs, ...) throws a plain TimeoutException. The pinned destination disk cannot
+    // be confirmed, so submission must not proceed -- Kafka could otherwise place the replica on an unvalidated
+    // disk and the capacity guarantee this feature exists to provide would be silently lost.
+    EasyMock.expect(placement.values()).andReturn(Map.of(DESTINATION, new KafkaFutureImpl<Void>()));
+    EasyMock.replay(admin, placement);
+    assertThrows(IllegalStateException.class,
+                 () -> ExecutionUtils.submitReplicaReassignmentTasks(admin, List.of(task(0, 20)), Set.of(), 0.8, 50));
     EasyMock.verify(admin, dirs, placement);
   }
 
@@ -299,16 +301,28 @@ public class InterBrokerDiskCapacityValidatorTest {
 
   @Test
   public void testLegacyReassignmentsDoNotIssueDiskRequests() {
-    ReplicaPlacementInfo source = new ReplicaPlacementInfo(0);
-    ExecutionProposal proposal = new ExecutionProposal(TP, 20, source, List.of(source), List.of(new ReplicaPlacementInfo(1)));
+    assertBrokerOnlySubmission(false);
+  }
+
+  @Test
+  public void testModeledLogDirsWithoutCapacityMapDoNotIssueDiskRequests() {
+    assertBrokerOnlySubmission(true);
+  }
+
+  private void assertBrokerOnlySubmission(boolean modeledLogDirs) {
+    ReplicaPlacementInfo source = new ReplicaPlacementInfo(0, modeledLogDirs ? "/source" : null);
+    ExecutionProposal proposal = new ExecutionProposal(TP, 20, source, List.of(source),
+        List.of(new ReplicaPlacementInfo(1, modeledLogDirs ? TARGET : null)));
     ExecutionTask task = new ExecutionTask(0, proposal, ExecutionTask.TaskType.INTER_BROKER_REPLICA_ACTION, 1000);
     task.inProgress(0);
     AdminClient admin = EasyMock.strictMock(AdminClient.class);
     AlterPartitionReassignmentsResult result = EasyMock.mock(AlterPartitionReassignmentsResult.class);
     Capture<Map<TopicPartition, java.util.Optional<NewPartitionReassignment>>> submitted = EasyMock.newCapture();
-    EasyMock.expect(admin.alterPartitionReassignments(EasyMock.capture(submitted))).andReturn(result);
+    EasyMock.expect(admin.alterPartitionReassignments(EasyMock.capture(submitted))).andReturn(result).times(2);
     EasyMock.replay(admin, result);
     assertSame(result, ExecutionUtils.submitReplicaReassignmentTasks(admin, List.of(task)));
+    assertEquals(List.of(1), submitted.getValue().get(TP).get().targetReplicas());
+    assertSame(result, ExecutionUtils.submitReplicaReassignmentTasks(admin, List.of(task), Set.of(), 0.8, 1000));
     assertEquals(List.of(1), submitted.getValue().get(TP).get().targetReplicas());
     assertTrue(InterBrokerDiskCapacityValidator.placementCompleted(admin, proposal, 1000));
     EasyMock.verify(admin, result);

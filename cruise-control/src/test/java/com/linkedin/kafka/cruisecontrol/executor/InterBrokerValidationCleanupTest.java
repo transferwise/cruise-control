@@ -2,20 +2,6 @@
  * Copyright 2026 LinkedIn Corp. Licensed under the BSD 2-Clause License (the "License"). See License in the project root for license information.
  */
 
-/*
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
-
 package com.linkedin.kafka.cruisecontrol.executor;
 
 import com.codahale.metrics.MetricRegistry;
@@ -69,7 +55,10 @@ import static org.junit.Assert.*;
 
 /** Exercises rejection, placement-query retries, rollback and throttle cleanup through the executor's real loop. */
 public class InterBrokerValidationCleanupTest {
-  private enum Failure { CAPACITY, ACKNOWLEDGEMENT, QUERY_RECOVERY, QUERY_EXHAUSTION, CANCELLATION_REJECTION }
+  private enum Failure {
+    CAPACITY, ACKNOWLEDGEMENT, QUERY_RECOVERY, QUERY_DELAYED_RECOVERY, QUERY_PERSISTENT, QUERY_RESET_RECOVERY, CANCELLATION_REJECTION,
+    SUBMISSION_AND_DRAIN, PERMANENT_QUERY, CLEANUP_REJECTION
+  }
 
   private ExecutionTask task(int partition) {
     ReplicaPlacementInfo source = new ReplicaPlacementInfo(0, "/source");
@@ -100,8 +89,23 @@ public class InterBrokerValidationCleanupTest {
   }
 
   @Test
-  public void testPersistentPlacementQueryFailureCancelsAndCleansUp() throws Exception {
-    verifyCleanup(Failure.QUERY_EXHAUSTION, false);
+  public void testRepeatedTransientPlacementFailuresRecoverWithoutCancelling() throws Exception {
+    verifyCleanup(Failure.QUERY_DELAYED_RECOVERY, false);
+  }
+
+  @Test(timeout = 15000)
+  public void testPersistentPlacementFailuresCancelAfterTenQueries() throws Exception {
+    verifyCleanup(Failure.QUERY_PERSISTENT, false);
+  }
+
+  @Test(timeout = 15000)
+  public void testSuccessfulQueryResetsConsecutiveFailureBudget() throws Exception {
+    verifyCleanup(Failure.QUERY_RESET_RECOVERY, false);
+  }
+
+  @Test
+  public void testPermanentPlacementQueryFailureCancelsExecution() throws Exception {
+    verifyCleanup(Failure.PERMANENT_QUERY, false);
   }
 
   @Test
@@ -109,7 +113,34 @@ public class InterBrokerValidationCleanupTest {
     verifyCleanup(Failure.CANCELLATION_REJECTION, true);
   }
 
+  @Test
+  public void testDrainFailureDoesNotReplaceSubmissionFailure() throws Exception {
+    verifyCleanup(Failure.SUBMISSION_AND_DRAIN, true);
+  }
+
+  @Test
+  public void testFailedThrottleCleanupIsRetriedBeforeNextExecution() throws Exception {
+    verifyCleanup(Failure.CLEANUP_REJECTION, false);
+  }
+
+  @Test(timeout = 15000)
+  public void testConfiguredPlacementFailureLimitIsEnforced() throws Exception {
+    verifyCleanup(Failure.QUERY_PERSISTENT, false, 3);
+  }
+
+  @Test(expected = org.apache.kafka.common.config.ConfigException.class)
+  public void testPlacementFailureLimitCannotDisableTheBound() {
+    java.util.Properties properties = KafkaCruiseControlUnitTestUtils.getKafkaCruiseControlProperties();
+    properties.setProperty(com.linkedin.kafka.cruisecontrol.config.constants.ExecutorConfig
+        .INTER_BROKER_DISK_PLACEMENT_MAX_CONSECUTIVE_QUERY_FAILURES_CONFIG, "0");
+    new KafkaCruiseControlConfig(properties);
+  }
+
   private void verifyCleanup(Failure failure, boolean previousCopy) throws Exception {
+    verifyCleanup(failure, previousCopy, 10);
+  }
+
+  private void verifyCleanup(Failure failure, boolean previousCopy, int maxQueryFailures) throws Exception {
     ExecutionTask incoming = task(1);
     ExecutionTask active = task(0);
     Set<ExecutionTask> running = new HashSet<>();
@@ -121,6 +152,8 @@ public class InterBrokerValidationCleanupTest {
     AtomicInteger submissions = new AtomicInteger();
     AtomicInteger cancellations = new AtomicInteger();
     AtomicInteger queries = new AtomicInteger();
+    AtomicInteger throttleWrites = new AtomicInteger();
+    AtomicInteger cleanupAttempts = new AtomicInteger();
     Map<ConfigResource, Map<String, String>> configValues = new HashMap<>();
     AdminClient admin = EasyMock.mock(AdminClient.class);
     EasyMock.expect(admin.describeConfigs(EasyMock.anyObject())).andAnswer(() -> {
@@ -148,11 +181,17 @@ public class InterBrokerValidationCleanupTest {
         for (AlterConfigOp op : change.getValue()) {
           if (op.opType() == AlterConfigOp.OpType.DELETE) {
             assertTrue("Throttle must remain until reassignment is settled", settled.get());
+            if (failure == Failure.CLEANUP_REJECTION && cleanupAttempts.incrementAndGet() <= 2) {
+              throw new IllegalStateException("throttle cleanup failed");
+            }
             values.remove(op.configEntry().name());
           } else {
             values.put(op.configEntry().name(), op.configEntry().value());
           }
         }
+      }
+      if (failure == Failure.SUBMISSION_AND_DRAIN && throttleWrites.incrementAndGet() == 1) {
+        throw new IllegalStateException("initial throttle write failed");
       }
       AlterConfigsResult result = EasyMock.mock(AlterConfigsResult.class);
       EasyMock.expect(result.all()).andReturn(KafkaFuture.completedFuture(null));
@@ -186,7 +225,7 @@ public class InterBrokerValidationCleanupTest {
       for (Map.Entry<TopicPartition, Optional<NewPartitionReassignment>> change : changes.entrySet()) {
         if (change.getValue().isEmpty()) {
           cancellations.incrementAndGet();
-          if (failure == Failure.CANCELLATION_REJECTION) {
+          if (failure == Failure.CANCELLATION_REJECTION || failure == Failure.SUBMISSION_AND_DRAIN) {
             KafkaFutureImpl<Void> rejected = new KafkaFutureImpl<>();
             rejected.completeExceptionally(new org.apache.kafka.common.errors.TimeoutException("rollback not acknowledged"));
             results.put(change.getKey(), rejected);
@@ -206,7 +245,9 @@ public class InterBrokerValidationCleanupTest {
     }).anyTimes();
     EasyMock.expect(admin.listPartitionReassignments()).andAnswer(() -> {
       ListPartitionReassignmentsResult result = EasyMock.mock(ListPartitionReassignmentsResult.class);
-      Map<TopicPartition, PartitionReassignment> ongoing = settled.get() ? Map.of()
+      // Delayed confirmation can outlive Kafka's reassignment itself; it must not trigger resubmission.
+      Map<TopicPartition, PartitionReassignment> ongoing = settled.get() || failure == Failure.QUERY_DELAYED_RECOVERY
+          || failure == Failure.QUERY_RESET_RECOVERY ? Map.of()
           : Map.of(incoming.proposal().topicPartition(), new PartitionReassignment(List.of(0, 1), List.of(1), List.of(0)));
       EasyMock.expect(result.reassignments()).andReturn(KafkaFuture.completedFuture(ongoing));
       EasyMock.replay(result);
@@ -215,12 +256,17 @@ public class InterBrokerValidationCleanupTest {
     EasyMock.expect(admin.describeReplicaLogDirs(Set.of(destination))).andAnswer(() -> {
       int count = queries.incrementAndGet();
       KafkaFutureImpl<ReplicaLogDirInfo> info = new KafkaFutureImpl<>();
-      if (failure == Failure.QUERY_EXHAUSTION || count == 1) {
+      if (failure == Failure.PERMANENT_QUERY) {
+        info.completeExceptionally(new org.apache.kafka.common.errors.KafkaStorageException("disk failed"));
+      } else if (failure == Failure.QUERY_PERSISTENT
+                 || (failure == Failure.QUERY_RESET_RECOVERY && count != 10 && count != 20)
+                 || (failure == Failure.QUERY_DELAYED_RECOVERY && count <= 4) || count == 1) {
         info.completeExceptionally(new java.util.concurrent.TimeoutException("transient query timeout"));
       } else {
         ReplicaLogDirInfo placement = EasyMock.mock(ReplicaLogDirInfo.class);
-        EasyMock.expect(placement.getCurrentReplicaLogDir()).andReturn("/target").anyTimes();
-        EasyMock.expect(placement.getFutureReplicaLogDir()).andReturn(null).anyTimes();
+        boolean inProgress = failure == Failure.QUERY_RESET_RECOVERY && count == 10;
+        EasyMock.expect(placement.getCurrentReplicaLogDir()).andReturn(inProgress ? "/source" : "/target").anyTimes();
+        EasyMock.expect(placement.getFutureReplicaLogDir()).andReturn(inProgress ? "/target" : null).anyTimes();
         EasyMock.replay(placement);
         info.complete(placement);
       }
@@ -229,6 +275,15 @@ public class InterBrokerValidationCleanupTest {
       EasyMock.replay(result);
       return result;
     }).anyTimes();
+    org.apache.kafka.clients.admin.DescribeClusterResult brokers = EasyMock.mock(org.apache.kafka.clients.admin.DescribeClusterResult.class);
+    EasyMock.expect(brokers.nodes()).andReturn(KafkaFuture.completedFuture(List.of(new Node(1, "localhost", 9093)))).anyTimes();
+    EasyMock.replay(brokers);
+    EasyMock.expect(admin.describeCluster()).andReturn(brokers).anyTimes();
+    DescribeLogDirsResult idleDirectories = EasyMock.mock(DescribeLogDirsResult.class);
+    EasyMock.expect(idleDirectories.descriptions()).andReturn(Map.of(1,
+        KafkaFuture.completedFuture(Map.of("/target", new LogDirDescription(null, Map.of()))))).anyTimes();
+    EasyMock.replay(idleDirectories);
+    EasyMock.expect(admin.describeLogDirs(Set.of(1))).andReturn(idleDirectories).anyTimes();
     admin.close();
     EasyMock.expectLastCall();
     MetadataAdminClient metadata = EasyMock.niceMock(MetadataAdminClient.class);
@@ -243,12 +298,14 @@ public class InterBrokerValidationCleanupTest {
     ExecutionTaskManager manager = EasyMock.niceMock(ExecutionTaskManager.class);
     EasyMock.expect(manager.numRemainingInterBrokerPartitionMovements()).andReturn(1).andReturn(0).anyTimes();
     EasyMock.expect(manager.getInterBrokerReplicaMovementTasks()).andReturn(List.of(incoming));
-    manager.markTasksInProgress(List.of(incoming));
-    EasyMock.expectLastCall().andAnswer(() -> {
-      incoming.inProgress(Time.SYSTEM.milliseconds());
-      running.add(incoming);
-      return null;
-    });
+    if (failure != Failure.SUBMISSION_AND_DRAIN) {
+      manager.markTasksInProgress(List.of(incoming));
+      EasyMock.expectLastCall().andAnswer(() -> {
+        incoming.inProgress(Time.SYSTEM.milliseconds());
+        running.add(incoming);
+        return null;
+      });
+    }
     manager.markTaskDead(EasyMock.anyObject());
     EasyMock.expectLastCall().andAnswer(() -> {
       ExecutionTask task = EasyMock.getCurrentArgument(0);
@@ -268,7 +325,12 @@ public class InterBrokerValidationCleanupTest {
         .andAnswer(() -> new HashSet<>(running)).anyTimes();
     ExecutionTaskTracker tracker = new ExecutionTaskTracker(new MetricRegistry(), Time.SYSTEM);
     EasyMock.expect(manager.getExecutionTasksSummary(EasyMock.anyObject())).andReturn(tracker.getExecutionTasksSummary(Set.of())).anyTimes();
-    KafkaCruiseControlConfig config = new KafkaCruiseControlConfig(KafkaCruiseControlUnitTestUtils.getKafkaCruiseControlProperties());
+    java.util.Properties properties = KafkaCruiseControlUnitTestUtils.getKafkaCruiseControlProperties();
+    if (maxQueryFailures != 10) {
+      properties.setProperty(com.linkedin.kafka.cruisecontrol.config.constants.ExecutorConfig
+          .INTER_BROKER_DISK_PLACEMENT_MAX_CONSECUTIVE_QUERY_FAILURES_CONFIG, Integer.toString(maxQueryFailures));
+    }
+    KafkaCruiseControlConfig config = new KafkaCruiseControlConfig(properties);
     com.linkedin.kafka.cruisecontrol.executor.concurrency.ExecutionConcurrencyManager concurrency =
         new com.linkedin.kafka.cruisecontrol.executor.concurrency.ExecutionConcurrencyManager(config);
     EasyMock.expect(manager.getExecutionConcurrencyManager()).andReturn(concurrency).anyTimes();
@@ -291,32 +353,72 @@ public class InterBrokerValidationCleanupTest {
     Method move = runnableClass.getDeclaredMethod("interBrokerMoveReplicas");
     move.setAccessible(true);
     try {
-      if (failure == Failure.CANCELLATION_REJECTION) {
-        java.lang.reflect.InvocationTargetException rejected =
-            assertThrows(java.lang.reflect.InvocationTargetException.class, () -> move.invoke(runnable));
-        assertEquals(IllegalStateException.class, rejected.getCause().getClass());
-        assertTrue(rejected.getCause().getMessage().contains("alterPartitionReassignments request timed out"));
+      if (failure == Failure.CANCELLATION_REJECTION || failure == Failure.SUBMISSION_AND_DRAIN) {
+        if (failure == Failure.SUBMISSION_AND_DRAIN) {
+          java.lang.reflect.InvocationTargetException rejected =
+              assertThrows(java.lang.reflect.InvocationTargetException.class, () -> move.invoke(runnable));
+          assertEquals("initial throttle write failed", rejected.getCause().getMessage());
+          assertEquals(1, rejected.getCause().getSuppressed().length);
+          assertTrue(rejected.getCause().getSuppressed()[0].getMessage().contains("alterPartitionReassignments request timed out"));
+        } else {
+          move.invoke(runnable);
+          Field original = runnableClass.getDeclaredField("_executionException");
+          original.setAccessible(true);
+          Throwable rejected = (Throwable) original.get(runnable);
+          assertTrue(rejected instanceof InterBrokerDiskCapacityValidator.ValidationException);
+          assertEquals(1, rejected.getSuppressed().length);
+          assertTrue(rejected.getSuppressed()[0].getMessage().contains("alterPartitionReassignments request timed out"));
+        }
         assertTrue(running.isEmpty());
         assertFalse(settled.get());
         assertTrue(configValues.values().stream().anyMatch(values -> !values.isEmpty()));
         assertEquals(1, cancellations.get());
         assertEquals(0, submissions.get());
+        Field pending = Executor.class.getDeclaredField("_pendingInterBrokerThrottleCleanup");
+        pending.setAccessible(true);
+        assertNotNull(pending.get(executor));
+        Method sanity = Executor.class.getDeclaredMethod("sanityCheckOngoingMovement");
+        sanity.setAccessible(true);
+        assertThrows(java.lang.reflect.InvocationTargetException.class, () -> sanity.invoke(executor));
+        assertNotNull(pending.get(executor));
+        assertTrue(configValues.values().stream().anyMatch(values -> !values.isEmpty()));
+        settled.set(true);
+        sanity.invoke(executor);
+        assertNull(pending.get(executor));
+        assertTrue(configValues.values().stream().allMatch(Map::isEmpty));
+      } else if (failure == Failure.CLEANUP_REJECTION) {
+        java.lang.reflect.InvocationTargetException rejected =
+            assertThrows(java.lang.reflect.InvocationTargetException.class, () -> move.invoke(runnable));
+        assertEquals("throttle cleanup failed", rejected.getCause().getMessage());
+        assertTrue(running.isEmpty());
+        assertTrue(configValues.values().stream().anyMatch(values -> !values.isEmpty()));
+        Field pending = Executor.class.getDeclaredField("_pendingInterBrokerThrottleCleanup");
+        pending.setAccessible(true);
+        assertNotNull(pending.get(executor));
+        Method sanity = Executor.class.getDeclaredMethod("sanityCheckOngoingMovement");
+        sanity.setAccessible(true);
+        sanity.invoke(executor);
+        assertNull(pending.get(executor));
+        assertTrue(configValues.values().stream().allMatch(Map::isEmpty));
       } else {
         move.invoke(runnable);
         assertTrue(running.isEmpty());
         assertTrue(configValues.values().stream().allMatch(Map::isEmpty));
-        if (failure == Failure.QUERY_RECOVERY) {
+        if (failure == Failure.QUERY_RECOVERY || failure == Failure.QUERY_DELAYED_RECOVERY
+            || failure == Failure.QUERY_RESET_RECOVERY) {
           assertEquals(ExecutionTaskState.COMPLETED, incoming.state());
-          assertEquals(2, queries.get());
+          assertEquals(failure == Failure.QUERY_RECOVERY ? 2 : failure == Failure.QUERY_RESET_RECOVERY ? 20 : 5, queries.get());
           assertEquals(0, cancellations.get());
         } else {
           assertEquals(ExecutionTaskState.DEAD, incoming.state());
-          assertEquals(previousCopy || failure == Failure.QUERY_EXHAUSTION ? 1 : 0, cancellations.get());
+          assertEquals(previousCopy || failure == Failure.PERMANENT_QUERY || failure == Failure.QUERY_PERSISTENT ? 1 : 0, cancellations.get());
         }
-        assertEquals(failure == Failure.QUERY_RECOVERY || failure == Failure.QUERY_EXHAUSTION ? 1 : 0, submissions.get());
-        if (failure == Failure.QUERY_EXHAUSTION) {
-          assertEquals(3, queries.get());
+        if (failure == Failure.QUERY_PERSISTENT) {
+          assertEquals(maxQueryFailures, queries.get());
         }
+        boolean submitted = failure == Failure.QUERY_RECOVERY || failure == Failure.QUERY_DELAYED_RECOVERY
+            || failure == Failure.PERMANENT_QUERY || failure == Failure.QUERY_PERSISTENT || failure == Failure.QUERY_RESET_RECOVERY;
+        assertEquals(submitted ? 1 : 0, submissions.get());
       }
     } finally {
       executor.shutdown();

@@ -2,20 +2,6 @@
  * Copyright 2017 LinkedIn Corp. Licensed under the BSD 2-Clause License (the "License"). See License in the project root for license information.
  */
 
-/*
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
-
 package com.linkedin.kafka.cruisecontrol.model;
 
 import com.linkedin.cruisecontrol.monitor.sampling.aggregator.AggregatedMetricValues;
@@ -190,16 +176,19 @@ public class ClusterModel implements Serializable {
    * @return selected disk, or null if no disk has sufficient capacity
    */
   public Disk destinationDisk(Replica replica, Broker destinationBroker) {
+    return destinationDisk(replica, destinationBroker, Math.ceil(replicaDiskSize(replica)));
+  }
+
+  private Disk destinationDisk(Replica replica, Broker destinationBroker, double size) {
     Disk bestDisk = null;
     double bestRatio = Double.POSITIVE_INFINITY;
-    double size = Math.ceil(replicaDiskSize(replica));
     Map<String, Double> reservations = _interBrokerDiskReservations.get(destinationBroker.id());
     if (reservations == null || !Double.isFinite(size) || size < 0) {
       return null;
     }
     for (Disk disk : destinationBroker.disks()) {
       // Returning an original replica must preserve its disk, avoiding mixed intra/inter-broker proposals.
-      if (replica.originalBroker().id() == destinationBroker.id() && replica.originalDisk() != null
+      if (replica != null && replica.originalBroker().id() == destinationBroker.id() && replica.originalDisk() != null
           && disk != replica.originalDisk()) {
         continue;
       }
@@ -237,7 +226,7 @@ public class ClusterModel implements Serializable {
     if (_plannedDiskReservations.get(replica) == disk) {
       usage -= _plannedDiskReservationSizes.get(replica);
     }
-    return usage + (replica.originalDisk() == disk ? 0 : size);
+    return usage + (replica != null && replica.originalDisk() == disk ? 0 : size);
   }
 
   private void releasePlannedDiskCopy(Replica replica) {
@@ -1046,7 +1035,7 @@ public class ClusterModel implements Serializable {
         // Future replicas may stay on their initial broker throughout optimization. Give them a
         // disk now, using the existing leader's size before this replica's load is populated.
         Replica leader = partition(tp).leader();
-        Disk destination = destinationDisk(leader, broker);
+        Disk destination = destinationDisk(replica, broker, Math.ceil(replicaDiskSize(leader)));
         if (destination == null) {
           throw new IllegalStateException("No disk has capacity for new replica " + tp + " on broker " + brokerId);
         }
@@ -1219,7 +1208,9 @@ public class ClusterModel implements Serializable {
               if (!currentOccupiedRack.contains(rack) || currentOccupiedRack.size() == racks.size()) {
                 int cursor = cursors[rackCursor];
                 Integer brokerId = brokersByRack.get(rack).get(cursor);
-                if (!newAssignedReplica.contains(brokerId) && canMoveReplicaToBroker(partition.leader(), broker(brokerId))) {
+                if (!newAssignedReplica.contains(brokerId)
+                    && (!interBrokerDiskCapacityCheckEnabled()
+                        || destinationDisk(null, broker(brokerId), Math.ceil(replicaDiskSize(partition.leader()))) != null)) {
                   attemptsWithoutAssignment = 0;
                   newAssignedReplica.add(brokersByRack.get(rack).get(cursor));
                   // Create a new replica in the cluster model and populate its load from the leader replica.

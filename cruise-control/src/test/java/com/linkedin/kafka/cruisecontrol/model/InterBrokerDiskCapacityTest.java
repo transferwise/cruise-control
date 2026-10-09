@@ -2,20 +2,6 @@
  * Copyright 2026 LinkedIn Corp. Licensed under the BSD 2-Clause License (the "License"). See License in the project root for license information.
  */
 
-/*
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
-
 package com.linkedin.kafka.cruisecontrol.model;
 
 import com.linkedin.cruisecontrol.monitor.sampling.aggregator.AggregatedMetricValues;
@@ -79,6 +65,40 @@ public class InterBrokerDiskCapacityTest {
     model.createOrDeleteReplicas(Map.of((short) 2, Set.of("topic")),
         Map.of("0", List.of(0), "1", List.of(1)), Map.of(0, "0", 1, "1"),
         com.linkedin.kafka.cruisecontrol.common.DeterministicCluster.generateClusterFromClusterModel(model));
+  }
+
+  @Test
+  public void testFutureReplicaDoesNotInheritMovedLeadersOriginalDiskAffinity() {
+    ClusterModel model = new ClusterModel(new ModelGeneration(0, 0), 1.0);
+    Map<Resource, Double> capacity = Map.of(Resource.DISK, 2000.0, Resource.CPU, 100.0,
+                                          Resource.NW_IN, 10000.0, Resource.NW_OUT, 10000.0);
+    model.createRack("0");
+    model.createRack("1");
+    model.createBroker("0", "host0", 0, new BrokerCapacityInfo(capacity, Map.of(SOURCE, 1000.0, LARGE, 1000.0)), true);
+    model.createBroker("1", "host1", 1, new BrokerCapacityInfo(capacity, Map.of(LARGE, 2000.0)), true);
+    model.broker(0).disk(SOURCE).setReportedUtilization(790);
+    model.broker(0).disk(LARGE).setReportedUtilization(0);
+    model.broker(1).disk(LARGE).setReportedUtilization(0);
+    Replica leader = addReplica(model, 0, 50);
+    model.enableInterBrokerDiskCapacityCheck(0.8);
+    model.relocateReplica(leader.topicPartition(), 0, 1);
+    increaseReplicationFactor(model);
+    Replica future = model.broker(0).replica(leader.topicPartition());
+    assertEquals(LARGE, future.disk().logDir());
+    assertNotSame(leader.originalDisk(), future.disk());
+  }
+
+  @Test
+  public void testDeletingResidentReplicaDoesNotCreditUnconfirmedDiskDeletion() {
+    ClusterModel model = cluster();
+    Replica incoming = addReplica(model, 1, 150);
+    TopicPartition existing = new TopicPartition("topic", 0);
+    addReplica(model, 0, 150);
+    model.createReplica("1", 1, existing, 1, false, false, LARGE, false);
+    model.broker(1).disk(LARGE).setReportedUtilization(700);
+    model.enableInterBrokerDiskCapacityCheck(0.8);
+    model.deleteReplica(existing, 1);
+    assertNull("The deleted replica's files still exist until Kafka executes the removal", model.destinationDisk(incoming, model.broker(1)));
   }
 
   @Test
@@ -331,6 +351,34 @@ public class InterBrokerDiskCapacityTest {
   }
 
   @Test
+  public void testDisabledCheckAllowsInterBrokerProposalWithModeledDestinationDisk() {
+    ClusterModel model = cluster();
+    Replica replica = addReplica(model, 0, 30);
+    Map<TopicPartition, List<ReplicaPlacementInfo>> initialReplicas = model.getReplicaDistribution();
+    Map<TopicPartition, ReplicaPlacementInfo> initialLeaders = model.getLeaderDistribution();
+    model.relocateReplica(replica.topicPartition(), 0, 1);
+    assertNotNull(replica.disk());
+    ExecutionProposal proposal = AnalyzerUtils.getDiff(initialReplicas, initialLeaders, model).iterator().next();
+    assertEquals(Set.of(new ReplicaPlacementInfo(1, replica.disk().logDir())), proposal.replicasToAdd());
+    assertTrue(proposal.replicasToMoveBetweenDisksByBroker().isEmpty());
+    assertTrue(proposal.destinationDiskCapacityByBroker().isEmpty());
+    assertFalse(proposal.getJsonStructure().containsKey("destinationLogDirs"));
+  }
+
+  @Test
+  public void testDisabledCheckStillAllowsIntraBrokerDiskProposal() {
+    ClusterModel model = cluster();
+    Replica replica = addReplica(model, 0, 1, 1, SMALL);
+    Map<TopicPartition, List<ReplicaPlacementInfo>> initialReplicas = model.getReplicaDistribution();
+    Map<TopicPartition, ReplicaPlacementInfo> initialLeaders = model.getLeaderDistribution();
+    model.relocateReplica(replica.topicPartition(), 1, LARGE);
+    ExecutionProposal proposal = AnalyzerUtils.getDiff(initialReplicas, initialLeaders, model).iterator().next();
+    assertTrue(proposal.destinationDiskCapacityByBroker().isEmpty());
+    assertTrue(proposal.replicasToAdd().isEmpty());
+    assertEquals(LARGE, proposal.replicasToMoveBetweenDisksByBroker().get(1).logdir());
+  }
+
+  @Test
   public void testDefaultBrokerOnlyModelRemainsCompatible() {
     ClusterModel model = new ClusterModel(new ModelGeneration(0, 0), 1.0);
     Map<Resource, Double> capacity = Map.of(Resource.DISK, 100.0, Resource.CPU, 100.0,
@@ -341,9 +389,14 @@ public class InterBrokerDiskCapacityTest {
     model.createBroker("1", "host1", 1, new BrokerCapacityInfo(capacity), false);
     TopicPartition tp = new TopicPartition("topic", 0);
     model.createReplica("0", 0, tp, 0, true);
+    Map<TopicPartition, List<ReplicaPlacementInfo>> initialReplicas = model.getReplicaDistribution();
+    Map<TopicPartition, ReplicaPlacementInfo> initialLeaders = model.getLeaderDistribution();
     assertTrue(model.canMoveReplicaToBroker(model.broker(0).replica(tp), model.broker(1)));
     model.relocateReplica(tp, 0, 1);
     assertNull(model.broker(1).replica(tp).disk());
+    ExecutionProposal proposal = AnalyzerUtils.getDiff(initialReplicas, initialLeaders, model).iterator().next();
+    assertTrue(proposal.destinationDiskCapacityByBroker().isEmpty());
+    assertNull(proposal.replicasToAdd().iterator().next().logdir());
     assertThrows(IllegalStateException.class, () -> model.enableInterBrokerDiskCapacityCheck(0.8));
   }
 }

@@ -167,7 +167,7 @@ RebalanceEndpoint:
         schema:
           type: integer
           format: int64
-          minimum: 1
+          minimum: 0
       - name: execution_progress_check_interval_ms
         in: query
         description: Execution progress check interval in milliseconds.

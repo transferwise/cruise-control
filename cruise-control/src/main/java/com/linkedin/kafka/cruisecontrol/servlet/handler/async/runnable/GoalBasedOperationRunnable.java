@@ -2,20 +2,6 @@
  * Copyright 2020 LinkedIn Corp. Licensed under the BSD 2-Clause License (the "License"). See License in the project root for license information.
  */
 
-/*
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
-
 package com.linkedin.kafka.cruisecontrol.servlet.handler.async.runnable;
 
 import com.linkedin.cruisecontrol.exception.NotEnoughValidWindowsException;
@@ -24,13 +10,16 @@ import com.linkedin.kafka.cruisecontrol.analyzer.OptimizerResult;
 import com.linkedin.kafka.cruisecontrol.analyzer.goals.Goal;
 import com.linkedin.kafka.cruisecontrol.async.progress.OperationProgress;
 import com.linkedin.kafka.cruisecontrol.config.KafkaCruiseControlConfig;
+import com.linkedin.kafka.cruisecontrol.config.constants.AnalyzerConfig;
 import com.linkedin.kafka.cruisecontrol.exception.KafkaCruiseControlException;
 import com.linkedin.kafka.cruisecontrol.monitor.ModelCompletenessRequirements;
 import com.linkedin.kafka.cruisecontrol.servlet.parameters.GoalBasedOptimizationParameters;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.TimeoutException;
 import java.util.function.Supplier;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -165,7 +154,7 @@ public abstract class GoalBasedOperationRunnable extends OperationRunnable {
     _kafkaCruiseControl.sanityCheckDryRun(_dryRun, _stopOngoingExecution);
     KafkaCruiseControlConfig config = _kafkaCruiseControl.config();
     sanityCheckGoals(_goals, _skipHardGoalCheck, config);
-    _goalsByPriority = goalsByPriority(_goals, config);
+    _goalsByPriority = goalsForOperation(config);
     _operationProgress = _future.operationProgress();
     if (_stopOngoingExecution) {
       maybeStopOngoingExecutionToModifyAndWait(_kafkaCruiseControl, _operationProgress);
@@ -179,6 +168,39 @@ public abstract class GoalBasedOperationRunnable extends OperationRunnable {
     if (!_dryRun) {
       _kafkaCruiseControl.failGeneratingProposalsForExecution(_uuid);
     }
+  }
+
+  /**
+   * Resolve goals before checking completeness or stopping an ongoing execution.
+   * @param config Cruise Control configuration
+   * @return goals supported by this operation, in priority order
+   */
+  protected List<Goal> goalsForOperation(KafkaCruiseControlConfig config) {
+    return goalsByPriority(_goals, config);
+  }
+
+  /**
+   * Resolve goals for operations that relocate replicas between brokers rather than balance their disks.
+   * @param config Cruise Control configuration
+   * @param operation operation name used in validation errors
+   * @return supported inter-broker goals in priority order
+   */
+  protected List<Goal> interBrokerGoalsForOperation(KafkaCruiseControlConfig config, String operation) {
+    List<Goal> goals = goalsByPriority(_goals, config);
+    Set<String> intraBrokerGoalNames = config.getConfiguredInstances(AnalyzerConfig.INTRA_BROKER_GOALS_CONFIG, Goal.class)
+        .stream().map(Goal::name).collect(Collectors.toSet());
+    List<String> requestedDiskGoals = goals.stream().map(Goal::name).filter(intraBrokerGoalNames::contains)
+        .collect(Collectors.toList());
+    if (_isTriggeredByUserRequest && _goals != null && !_goals.isEmpty() && !requestedDiskGoals.isEmpty()) {
+      throw new IllegalArgumentException(operation + " do not support intra-broker goals " + requestedDiskGoals
+          + ". Use inter-broker goals for this request and rebalance_disk=true in a separate rebalance request for disk balancing.");
+    }
+    List<Goal> interBrokerGoals = goals.stream().filter(goal -> !intraBrokerGoalNames.contains(goal.name()))
+        .collect(Collectors.toList());
+    if (interBrokerGoals.isEmpty()) {
+      throw new IllegalArgumentException(operation + " require at least one inter-broker optimization goal.");
+    }
+    return interBrokerGoals;
   }
 
   /**

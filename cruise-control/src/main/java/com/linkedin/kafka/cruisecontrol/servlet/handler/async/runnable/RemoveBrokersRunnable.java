@@ -8,6 +8,8 @@ import com.linkedin.cruisecontrol.exception.NotEnoughValidWindowsException;
 import com.linkedin.kafka.cruisecontrol.KafkaCruiseControl;
 import com.linkedin.kafka.cruisecontrol.analyzer.OptimizationOptions;
 import com.linkedin.kafka.cruisecontrol.analyzer.OptimizerResult;
+import com.linkedin.kafka.cruisecontrol.analyzer.goals.Goal;
+import com.linkedin.kafka.cruisecontrol.config.KafkaCruiseControlConfig;
 import com.linkedin.kafka.cruisecontrol.config.constants.ExecutorConfig;
 import com.linkedin.kafka.cruisecontrol.exception.KafkaCruiseControlException;
 import com.linkedin.kafka.cruisecontrol.executor.ExecutionProposal;
@@ -97,6 +99,11 @@ public class RemoveBrokersRunnable extends GoalBasedOperationRunnable {
   @Override
   protected OptimizationResult getResult() throws Exception {
     return new OptimizationResult(computeResult(), _kafkaCruiseControl.config());
+  }
+
+  @Override
+  protected List<Goal> goalsForOperation(KafkaCruiseControlConfig config) {
+    return interBrokerGoalsForOperation(config, "Broker removals");
   }
 
   @Override

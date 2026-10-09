@@ -37,7 +37,8 @@ import org.apache.kafka.common.Node;
 import org.apache.kafka.common.TopicPartitionReplica;
 import org.apache.kafka.common.errors.KafkaStorageException;
 import org.apache.kafka.common.errors.LogDirNotFoundException;
-import org.apache.kafka.common.errors.ReplicaNotAvailableException;
+import org.apache.kafka.common.errors.ApiException;
+import org.apache.kafka.common.errors.RetriableException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -74,20 +75,36 @@ public final class ExecutorAdminUtils {
 
   /**
    * Fetch the logdir information for subject replicas in intra-broker replica movement tasks.
-   * Optionally populates a set of tasks that had non-retriable failures (e.g. disk/replica genuinely unavailable).
+   * Optionally populates a set of tasks that had confirmed disk failures.
    *
    * @param tasks The tasks to check.
    * @param adminClient The adminClient to send describeReplicaLogDirs request.
    * @param config The config object that holds all the Cruise Control related configs.
    * @param nonRetriableFailures If non-null, populated with tasks whose logdir query failed with a non-retriable error
-   *                             (e.g. {@link ReplicaNotAvailableException}, {@link LogDirNotFoundException},
-   *                             {@link KafkaStorageException}), indicating the disk/replica is genuinely unavailable.
+   *                             (e.g. {@link LogDirNotFoundException}, {@link KafkaStorageException}).
    * @return Replica logdir information by task.
    */
   static Map<ExecutionTask, ReplicaLogDirInfo> getLogdirInfoForExecutionTask(Collection<ExecutionTask> tasks,
                                                                              AdminClient adminClient,
                                                                              KafkaCruiseControlConfig config,
                                                                              Set<ExecutionTask> nonRetriableFailures) {
+    return getLogdirInfoForExecutionTask(tasks, adminClient, config, nonRetriableFailures, null);
+  }
+
+  /**
+   * Fetch placement while distinguishing confirmed disk failures from unavailable replicas and transient errors.
+   * @param tasks tasks to query
+   * @param adminClient Kafka admin client
+   * @param config operator configuration
+   * @param nonRetriableFailures optional destination for non-retriable replica or disk errors
+   * @param failedDisks optional destination for storage or missing-directory errors only
+   * @return successfully queried placements
+   */
+  static Map<ExecutionTask, ReplicaLogDirInfo> getLogdirInfoForExecutionTask(Collection<ExecutionTask> tasks,
+                                                                             AdminClient adminClient,
+                                                                             KafkaCruiseControlConfig config,
+                                                                             Set<ExecutionTask> nonRetriableFailures,
+                                                                             Set<ExecutionTask> failedDisks) {
     Set<TopicPartitionReplica> replicasToCheck = new HashSet<>();
     Map<ExecutionTask, ReplicaLogDirInfo> logdirInfoByTask = new HashMap<>();
     Map<TopicPartitionReplica, ExecutionTask> taskByReplica = new HashMap<>();
@@ -106,6 +123,9 @@ public final class ExecutorAdminUtils {
         if (nonRetriableFailures != null && isNonRetriableLogDirError(e)) {
           nonRetriableFailures.add(taskByReplica.get(entry.getKey()));
         }
+        if (failedDisks != null && (e.getCause() instanceof KafkaStorageException || e.getCause() instanceof LogDirNotFoundException)) {
+          failedDisks.add(taskByReplica.get(entry.getKey()));
+        }
       } catch (InterruptedException | TimeoutException e) {
         LOG.warn("Encounter exception {} when fetching logdir information for replica {}", e.getMessage(), entry.getKey());
       }
@@ -121,8 +141,7 @@ public final class ExecutorAdminUtils {
    */
   private static boolean isNonRetriableLogDirError(ExecutionException e) {
     Throwable cause = e.getCause();
-    return cause instanceof ReplicaNotAvailableException
-        || cause instanceof LogDirNotFoundException
+    return cause instanceof LogDirNotFoundException
         || cause instanceof KafkaStorageException;
   }
 
@@ -168,14 +187,31 @@ public final class ExecutorAdminUtils {
       replicaAssignment.put(tpr, t.proposal().replicasToMoveBetweenDisksByBroker().get(t.brokerId()).logdir());
       replicaToTask.put(tpr, t);
     });
-    for (Map.Entry<TopicPartitionReplica, KafkaFuture<Void>> entry: adminClient.alterReplicaLogDirs(replicaAssignment).values().entrySet()) {
+    Map<TopicPartitionReplica, KafkaFuture<Void>> acknowledgements = adminClient.alterReplicaLogDirs(replicaAssignment).values();
+    for (TopicPartitionReplica replica : replicaAssignment.keySet()) {
+      ExecutionTask task = replicaToTask.get(replica);
+      if (!acknowledgements.containsKey(replica)) {
+        LOG.warn("Missing disk-copy acknowledgement for {}; retaining task for placement polling.", replica);
+        continue;
+      }
       try {
-        entry.getValue().get(config.getLong(LOGDIR_RESPONSE_TIMEOUT_MS_CONFIG), TimeUnit.MILLISECONDS);
-      } catch (InterruptedException | ExecutionException | TimeoutException | LogDirNotFoundException | KafkaStorageException
-          | ReplicaNotAvailableException e) {
-        LOG.warn("Encounter exception {} when trying to execute task {}, mark task dead.", e.getMessage(), replicaToTask.get(entry.getKey()));
-        executionTaskManager.markTaskAborting(replicaToTask.get(entry.getKey()));
-        executionTaskManager.markTaskDead(replicaToTask.get(entry.getKey()));
+        acknowledgements.get(replica).get(config.getLong(LOGDIR_RESPONSE_TIMEOUT_MS_CONFIG), TimeUnit.MILLISECONDS);
+      } catch (ExecutionException e) {
+        if (isNonRetriableLogDirError(e)
+            || (e.getCause() instanceof ApiException && !(e.getCause() instanceof RetriableException))) {
+          LOG.warn("Disk-copy submission rejected for task {}.", task, e);
+          executionTaskManager.markTaskAborting(task);
+          executionTaskManager.markTaskDead(task);
+        } else {
+          LOG.warn("Disk-copy acknowledgement failed for {}; retaining task for placement polling.", task, e);
+        }
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+        LOG.warn("Interrupted awaiting disk-copy acknowledgement for {}; retaining task for placement polling.", task, e);
+        // The entire batch was already submitted. Preserve every task for polling, but stop blocking on acknowledgements.
+        return;
+      } catch (TimeoutException e) {
+        LOG.warn("Disk-copy acknowledgement timed out for {}; retaining task for placement polling.", task, e);
       }
     }
   }
@@ -204,4 +240,3 @@ public final class ExecutorAdminUtils {
     return false;
   }
 }
-
